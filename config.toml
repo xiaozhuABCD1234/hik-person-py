@@ -5,14 +5,14 @@
 # 命令行想临时覆盖就见 `uv run hik-person --help`。
 
 [camera]
-# 本机 MV-CB016-10UC-S；用 `uv run hik-person --list` 看所有可选相机。
+# 本机 MV-CS016-10UC（DA2360141）；用 `uv run hik-person --list` 看所有可选相机。
 # 留空则按下面的 index 在"物理相机"里数（虚拟相机不占号）。
-# 另一台 MV-CS016-10UC（DA2360141）用 --serial 指即可；`feature` 的符号名会自动
+# 另一台 MV-CB016-10UC-S（DB1505178）用 --serial 指即可；`feature` 的符号名会自动
 # 换成该机型认的那个，不用改这个文件。
-serial = "DB1505178"
+serial = "DA2360141"
 index = 0
 
-# 采集帧率上限（0 = 保持设备设置）。这台机型的实际上限取决于 ADCBitDepth：
+# 采集帧率上限（0 = 保持设备设置）。MV-CB016-10UC-S 实测上限取决于 ADCBitDepth：
 # Bits_8 -> 249.1 fps，Bits_12 -> 165.4 fps，见下面的 feature。
 camera_fps = 60.0
 
