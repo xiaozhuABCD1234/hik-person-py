@@ -277,8 +277,9 @@ def main(argv: list[str] | None = None) -> int:
     tracker = None
     if view is not None and settings.pose3d_enabled:
         from .depth import DepthEstimator
+        from .geometry import Intrinsics, lift_keypoints
         from .pose import NUM_KEYPOINTS
-        from .pose3d import Intrinsics, lift_keypoints, to_display, valid_mask
+        from .pose3d import depth_valid_mask, to_display
         from .track import Pose3DTracker
 
         depth_path = resolve_path(settings.pose3d_weights)
@@ -453,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
                     else:
                         items = [
                             to_display(
-                                lifted[i], valid_mask(lifted[i], confs[i], settings.kpt_conf)
+                                lifted[i], depth_valid_mask(lifted[i], confs[i], settings.kpt_conf)
                             )
                             for i in range(len(boxes))
                         ]
