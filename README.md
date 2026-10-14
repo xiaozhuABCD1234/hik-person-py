@@ -324,10 +324,9 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 | `camera/depth` | 仅 pose3d：估计深度图 `DepthImage`（Turbo 伪彩，送前先降采样） |
 | `person/count` | 人数曲线（右侧 TimeSeriesView） |
 | `person/events` | 人数变化日志（带各框置信度） |
-| `camera/pose3d/joints` | 仅 pose+pose3d：3D 关键点 `Points3D`（相机坐标，米） |
 | `camera/pose3d/skeleton` | 仅 pose+pose3d：3D 骨架 `LineStrips3D` |
 | `camera/pose3d/positions` | 每个人的 3D 位置球，标签 = `#id 距离 · 地面速度` |
-| `world/...` | 开了 `[world]` 才有：骨架/轨迹/位置的世界系副本（`RIGHT_HAND_Z_UP`） |
+| `world/...` | 开了 `[world]` 才有：骨架/位置的世界系副本（`RIGHT_HAND_Z_UP`） |
 | `person/values` | 每人一行的极简数值（距/速/状态/有效关节），右列顶部 |
 | `person/metrics/<组>/<指标>/<id>` | 每个人的指标曲线（`person/metrics/speed/speed/<id>` 速度；颜色与图例名由 id 决定） |
 
@@ -352,8 +351,12 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 * **深度图**先整倍数降采样再送（1440×1080 的 float32 每帧 6 MB，小窗用不着），
   `DepthImage` 在 viewer 侧上色。
 
-小窗里画的是关节点 `Points3D` + 骨头 `LineStrips3D`（相机坐标系，`RIGHT_HAND_Y_DOWN`），
-外加每个人的位置球与轨迹；颜色跟着 id 走，标签是 `#id 距离 · 地面速度`（见「跟踪与 ID」）。
+小窗里画的是骨头 `LineStrips3D` + 每个人一个位置球（相机坐标系，`RIGHT_HAND_Y_DOWN`），
+颜色跟着 id 走，位置球的标签是 `#id 距离 · 地面速度`（见「跟踪与 ID」）。
+
+**3D 视图不再记逐个关节**：17 个带名字的关节点（`Points3D` + 标签）会盖住骨架本身，
+鼠标扫过去还全是坐标读数。关节数据仍然在（`person.joints`、JSONL 里的 `valid_keypoints`），
+想逐个关节看名字与坐标就看 2D 关键点那层（`camera/image/keypoints`）。
 
 **它只是看着像 3D，不是测量**：深度是模型从单张图估的，绝对尺度会有出入（实测
 `bus.jpg` 里一个人的垂直跨度会比真身高大一截），而且相机没标定，只按一个假定的视场角

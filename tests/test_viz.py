@@ -216,12 +216,9 @@ def test_log_people3d_logs_static_and_sets_coordinates(monkeypatch: pytest.Monke
     v.log_people3d([person()])
 
     entities = {entity for entity, _ in calls}
-    assert {
-        "camera/pose3d",
-        "camera/pose3d/joints",
-        "camera/pose3d/skeleton",
-        "camera/pose3d/positions",
-    } <= entities
+    assert {"camera/pose3d", "camera/pose3d/skeleton", "camera/pose3d/positions"} <= entities
+    # 逐个关节的点与名字不进 3D 视图（只留骨架与每人一个位置球）
+    assert not [entity for entity in entities if entity.endswith("/joints")], entities
     assert all(static for entity, static in calls if entity.startswith("camera/"))
 
 
@@ -261,7 +258,7 @@ def test_log_people3d_with_nobody_clears_the_view(monkeypatch: pytest.MonkeyPatc
     v = RerunView(spawn=False, show_pose3d=True)
     v.log_people3d([])
     entities = {entity for entity, _ in calls}
-    assert "camera/pose3d/joints" in entities  # 记一份空的，旧骨架才会消失
+    assert "camera/pose3d/skeleton" in entities  # 记一份空的，旧骨架才会消失
 
 
 def test_trails_are_not_drawn(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -290,11 +287,11 @@ def test_world_view_logs_a_transformed_copy(monkeypatch: pytest.MonkeyPatch) -> 
     v = RerunView(spawn=False, show_pose3d=True, world=world, show_world_view=True)
     v.log_people3d([person()])
 
-    # 顺序：相机系关节、相机系位置、世界系关节、世界系位置
+    # Points3D 只被调两次：相机系位置、世界系位置（关节不再单独记）
     calls = captured["positions"]
-    assert len(calls) == 4
-    camera_position = calls[1]
-    world_position = calls[3]
+    assert len(calls) == 2
+    camera_position = calls[0]
+    world_position = calls[1]
     assert np.allclose(camera_position, [[0.0, 0.0, 2.5]], atol=1e-5)
     assert np.allclose(
         world_position, [world.apply(np.array([0.0, 0.0, 2.5], np.float32))], atol=1e-5

@@ -10,14 +10,14 @@
 ``camera/image/skeleton``            2D 骨架连线
 ``camera/depth``                     估计深度（DepthImage，悬停看米数）
 ``camera/pose3d``                    相机系 3D 视图根（RIGHT_HAND_Y_DOWN）
-``camera/pose3d/{joints,skeleton}``  3D 骨架（单目深度）
+``camera/pose3d/skeleton``           3D 骨架连线（单目深度）
 ``camera/pose3d/positions``          每个人的 3D 位置（标签 = id + 距离 + 速度）
 ``person/values``                    极简数值行（每人一行短文本）
 ``person/metrics/speed/<id>``        每个人的速度曲线（右侧，一人一条）
 ``person/count``                     人数标量
 ``person/events``                    人数变化日志
 ``world/...``                        世界系 3D 视图根（RIGHT_HAND_Z_UP，可选）
-``world/{joints,skeleton,positions}``  世界系副本（刚体变换后）
+``world/{skeleton,positions}``       世界系副本（刚体变换后）
 ===================================  =======================================
 
 每个人的颜色由 id 决定（``color_for``），所以同一个 id 在 2D、3D 与坐标曲线里都是
@@ -47,7 +47,6 @@ PALETTE: tuple[tuple[int, int, int], ...] = (
     (150, 255, 140),
 )
 POSITION_RADIUS = 0.04  # 米：3D 位置球半径
-JOINT_RADIUS = 0.02  # 米：关节球半径
 
 
 def color_for(person_id: int) -> tuple[int, int, int]:
@@ -425,7 +424,11 @@ class RerunView:
 
     # ---------------------------------------------------------------- 3D
     def log_people3d(self, people) -> None:
-        """记 3D：骨架 + 轨迹 + 位置（相机坐标系，米）；开了 ``[world]`` 再记一份世界系。
+        """记 3D：骨架连线 + 每人一个位置球（相机坐标系，米）；开了 ``[world]`` 再记一份世界系。
+
+        **不记逐个关节**：17 个带名字的关节点会盖住骨架本身，鼠标扫过去还全是
+        坐标读数；关节数据仍在（``person.joints`` / JSONL），只是不进 3D 视图。
+        想逐个关节看坐标就看 2D 关键点，或把 joints 那段加回来。
 
         与 2D 一样走 static：viewer 只留最新一份，``people`` 为空就把 3D 视图清空。
         世界系那份只是同一个刚体变换套一遍，方便直接看“人在地面上的位置”。
@@ -435,9 +438,6 @@ class RerunView:
         if self.world is not None:
             self._log_coords("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, name="世界系")
 
-        joints: list[np.ndarray] = []
-        labels: list[str] = []
-        colors: list[tuple[int, int, int]] = []
         strips: list[np.ndarray] = []
         strip_colors: list[tuple[int, int, int]] = []
         positions: list[np.ndarray] = []
@@ -446,10 +446,6 @@ class RerunView:
 
         for person in people:
             color = color_for(person.id)
-            if len(person.joints):
-                joints.append(np.asarray(person.joints, dtype=np.float32))
-                labels.extend(f"#{person.id} {name}" for name in person.names)
-                colors.extend([color] * len(person.joints))
             for strip in person.strips:
                 strips.append(np.asarray(strip, dtype=np.float32))
                 strip_colors.append(color)
@@ -462,15 +458,6 @@ class RerunView:
                 )
                 position_colors.append(color)
 
-        self._log(
-            "camera/pose3d/joints",
-            rr.Points3D(
-                np.concatenate(joints) if joints else np.zeros((0, 3), dtype=np.float32),
-                labels=labels,
-                colors=colors or None,
-                radii=JOINT_RADIUS,
-            ),
-        )
         self._log("camera/pose3d/skeleton", rr.LineStrips3D(strips, colors=strip_colors))
         self._log(
             "camera/pose3d/positions",
@@ -485,20 +472,8 @@ class RerunView:
         if self.world is None:
             return
         # 世界系视图：同一个刚体变换套一遍
-        world_joints = [self.world.apply(points) for points in joints]
         world_strips = [self.world.apply(strip) for strip in strips]
         world_positions = [self.world.apply(point) for point in positions]
-        self._log(
-            "world/joints",
-            rr.Points3D(
-                np.concatenate(world_joints)
-                if world_joints
-                else np.zeros((0, 3), dtype=np.float32),
-                labels=labels,
-                colors=colors or None,
-                radii=JOINT_RADIUS,
-            ),
-        )
         self._log("world/skeleton", rr.LineStrips3D(world_strips, colors=strip_colors))
         self._log(
             "world/positions",
