@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""rerun 可视化：检测框 + 人数（姿态任务再加关键点与骨架）。
+"""rerun 可视化：关键点/骨架 + 人数。
 
 记录到这些实体：
 
@@ -163,7 +163,7 @@ class RerunView:
         else:  # pragma: no cover - 老版本
             rr.set_time_sequence("frame", frame_number)
 
-    def log_frame(self, frame, image_bgr, *, detections=(), poses=()) -> None:
+    def log_frame(self, frame, image_bgr, *, poses=()) -> None:
         """记一帧：原图 + 结构化框/骨架 + 人数。
 
         ``image_bgr`` 必须是**相机原图**，不要传 ``result.plot()`` 画过的图：框、
@@ -181,7 +181,7 @@ class RerunView:
             self._send_blueprint(width, height)
 
         self._log("camera/image", self._encode(image_bgr))
-        instances = [*detections, *poses]
+        instances = list(poses)
         self._log_boxes(instances)
         if poses:
             self._log_poses(poses)

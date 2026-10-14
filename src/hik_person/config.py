@@ -17,9 +17,15 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # src/hik_person/config.py -> 项目根
 DEFAULT_CONFIG_NAME = "config.toml"
-TASKS: tuple[str, ...] = ("detect", "pose")
-# 曝光/增益模式：sdk = 相机自动；manual = 固定值；software = 程序闭环
+# 曝光/增益模式：sdk = 相机自动；manual = 固定值
 EXPOSURE_MODES: tuple[str, ...] = ("sdk", "manual")
+
+# 已经从 config.toml 里拿掉的键。旧文件里留着它们只会拿到一个泛泛的"未知配置项"，
+# 这里专门说一句该怎么办，免得把"已移除"当成"拼错了"。
+REMOVED_KEYS: dict[tuple[str, str], str] = {
+    ("detector", "task"): "现在只有 pose 一条线（关键点/骨架），删掉这一行",
+    ("detector", "iou"): "pose 线不用 NMS 的 iou 参数（用 ultralytics 默认值），删掉这一行",
+}
 
 
 @dataclass
@@ -46,15 +52,15 @@ class Settings:
     feature: list[str] = field(default_factory=list)
 
     # -------------------------------------------------------------- [detector]
-    task: str = "pose"
-    weights: str = "models/yolo26n-pose.pt"
+    # 姿态权重：m 档在 8G 显存 + 15 Hz 下实测 16.6 ms/帧（n 档 7.4 ms），精度更好。
+    weights: str = "models/yolo26m-pose.pt"
     conf: float = 0.35
-    iou: float = 0.50
     imgsz: int = 640
     device: str = ""
     kpt_conf: float = 0.5
 
     # ------------------------------------------------------------------- [run]
+    # 推理频率（Hz）。键名沿用 detect_hz：改名字只会让已写的 config.toml 报未知配置项。
     detect_hz: float = 15.0
     rate_tolerance: float = 0.9
     duration: float = 0.0
@@ -77,9 +83,9 @@ class Settings:
     rerun_port: int = 9876
 
     # ---------------------------------------------------------------- [pose3d]
-    # 单目 3D：yolo26n-depth 给每个关键点补深度，rerun 右下角小窗画 3D 骨架。
+    # 单目 3D：yolo26m-depth 给每个关键点补深度，rerun 右下角小窗画 3D 骨架。
     pose3d_enabled: bool = True
-    pose3d_weights: str = "models/yolo26s-depth.pt"
+    pose3d_weights: str = "models/yolo26m-depth.pt"
     pose3d_imgsz: int = 640
     # 深度推理频率（Hz）。深度模型不便宜，没必要跟满 detect_hz。
     pose3d_hz: float = 15.0
@@ -113,10 +119,8 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("camera", "exposure_fps_headroom"): "exposure_fps_headroom",
     ("camera", "read_timeout_ms"): "read_timeout_ms",
     ("camera", "feature"): "feature",
-    ("detector", "task"): "task",
     ("detector", "weights"): "weights",
     ("detector", "conf"): "conf",
-    ("detector", "iou"): "iou",
     ("detector", "imgsz"): "imgsz",
     ("detector", "device"): "device",
     ("detector", "kpt_conf"): "kpt_conf",
@@ -212,8 +216,14 @@ def load_settings(path: Path | str | None = None) -> tuple[Settings, list[str]]:
             warnings.append(f"{section!r} 不是表（table），已忽略")
             continue
         for key in table:
-            if (section, key) not in CONFIG_FIELDS:
-                warnings.append(f"未知配置项 [{section}].{key}，已忽略")
+            if (section, key) in CONFIG_FIELDS:
+                continue
+            removed = REMOVED_KEYS.get((section, key))
+            warnings.append(
+                f"[{section}].{key} 已移除，{removed}（已忽略）"
+                if removed
+                else f"未知配置项 [{section}].{key}，已忽略"
+            )
 
     return settings, warnings
 

@@ -60,14 +60,11 @@ read_timeout_ms = 1000
 feature = ["ADCBitDepth=Bits_8"]
 
 [detector]
-# "pose"   = 关键点/骨架（默认，weights 用 YOLO pose 权重）；
-# "detect" = 只要检测框（weights 用自训练模型 models/best.pt）。
-# 切任务时同时改 task 和 weights 两项。
-task = "pose"
-# 相对路径按项目根解析。
-weights = "models/yolo26n-pose.pt"
+# 姿态权重（ultralytics pose 任务）：给检测框 + 17 个 COCO 关键点，唯一一条任务线。
+# 相对路径按项目根解析。n/s/m/l/x 同一 API；这里选 m：n 档实测 7.4 ms/帧，
+# m 档 16.6 ms/帧（RTX 4060 Laptop，imgsz 640），15 Hz 的 66 ms 预算下更准。
+weights = "models/yolo26m-pose.pt"
 conf = 0.35
-iou = 0.50
 imgsz = 640
 # "" = 有 CUDA 用 cuda:0，否则 cpu。
 device = ""
@@ -106,15 +103,15 @@ jpeg_quality = 75
 port = 9876
 
 [pose3d]
-# 单目 3D 骨架：yolo26n-depth 给 pose 的 17 个关键点补一个 z，在 rerun 右下角
-# 的 Spatial3DView 小窗里画出来。只在 task = "pose" 且 rerun 开着时生效。
+# 单目 3D 骨架：yolo26*-depth 给 pose 的 17 个关键点补一个 z，在 rerun 右下角
+# 的 Spatial3DView 小窗里画出来。只在 rerun 开着时生效。
 # 深度是模型从单张图估的，绝对尺度会有出入；看骨架结构够用，别当测距。
 enabled = true
 
 # depth 权重（ultralytics 的 depth 任务模型）。相对路径按项目根解析。
-# n/s/m/l/x 都在同一个 API 下；这里选 s：官方 NYU δ1 比 n 高（0.896 vs 0.882），
-# 本机实测输入 640 时 ~10 ms（n 为 7.7 ms）。换模型只改这一行。
-weights = "models/yolo26s-depth.pt"
+# n/s/m/l/x 都在同一个 API 下；这里选 m：精度比 s 明显好，跟 m-pose 合计仍在 15 Hz 的
+# 66 ms 预算内（各档延迟见 README 的深度模型选型表）。换模型只改这一行。
+weights = "models/yolo26m-depth.pt"
 # 深度推理的输入边长。权重是在 768 训练/评测的，320 远没喂饱：实测跟 m@768 的
 # 一致度从 0.75（320）跳到 0.96（640），收益比换大模型还大。深度模型不便宜，
 # 没必要跟满 detect_hz（见 hz）。

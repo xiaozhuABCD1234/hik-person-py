@@ -1,7 +1,7 @@
 [project]
 name = "hik-person"
 version = "0.1.0"
-description = "HIKROBOT MVS camera + YOLO person detection + Rerun visualization"
+description = "HIKROBOT MVS camera + YOLO pose + Rerun visualization"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]

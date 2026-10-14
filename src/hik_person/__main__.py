@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""hik-person: HIKROBOT MVS 相机 -> YOLO 人体检测 -> rerun。
+"""hik-person: HIKROBOT MVS 相机 -> YOLO 姿态（骨架）-> rerun。
 
 参数都放在 config.toml（见 `--show-config` 看生效值）；命令行只用来临时覆盖。
 
@@ -22,7 +22,6 @@ import numpy as np
 from .colors import pixel_type_name
 from .config import (
     EXPOSURE_MODES,
-    TASKS,
     Settings,
     apply_cli,
     default_config_path,
@@ -42,7 +41,7 @@ from .mvs import (
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="hik-person",
-        description="HIKROBOT MVS 相机 -> YOLO 人体检测 -> rerun。"
+        description="HIKROBOT MVS 相机 -> YOLO 姿态（骨架）-> rerun。"
         "参数默认读 config.toml，命令行只做临时覆盖",
     )
     p.add_argument(
@@ -86,9 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
         "例：--feature ADCBitDepth=Bits_8 解锁 249 fps（写别的机型的符号名会自动改写）",
     )
     p.add_argument("--weights", default=None, help="覆盖 [detector].weights")
-    p.add_argument("--task", default=None, choices=TASKS, help="覆盖 [detector].task")
     p.add_argument("--conf", type=float, default=None, help="覆盖 [detector].conf")
-    p.add_argument("--iou", type=float, default=None, help="覆盖 [detector].iou")
     p.add_argument("--imgsz", type=int, default=None, help="覆盖 [detector].imgsz")
     p.add_argument("--device", default=None, help="覆盖 [detector].device：''/cuda:0/cpu")
     p.add_argument("--kpt-conf", type=float, default=None, help="覆盖 [detector].kpt_conf")
@@ -197,13 +194,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    if settings.task not in TASKS:
-        print(
-            f"error: [detector].task = {settings.task!r} 不认识，可选 {TASKS}",
-            file=sys.stderr,
-        )
-        return 2
-
     for spec in settings.feature:
         try:
             parse_feature_spec(spec)
@@ -235,26 +225,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        if settings.task == "pose":
-            from .pose import PoseEstimator
+        from .pose import PoseEstimator
 
-            estimator = PoseEstimator(
-                weights_path,
-                device=settings.device or None,
-                conf=settings.conf,
-                imgsz=settings.imgsz,
-                kpt_conf=settings.kpt_conf,
-            )
-        else:
-            from .detect import PersonDetector
-
-            estimator = PersonDetector(
-                weights_path,
-                device=settings.device or None,
-                conf=settings.conf,
-                iou=settings.iou,
-                imgsz=settings.imgsz,
-            )
+        estimator = PoseEstimator(
+            weights_path,
+            device=settings.device or None,
+            conf=settings.conf,
+            imgsz=settings.imgsz,
+            kpt_conf=settings.kpt_conf,
+        )
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -273,10 +252,8 @@ def main(argv: list[str] | None = None) -> int:
             server_memory_limit=settings.rerun_server_memory_limit,
             jpeg_quality=settings.rerun_jpeg_quality,
             port=settings.rerun_port,
-            show_pose3d=settings.pose3d_enabled and settings.task == "pose",
-            show_depth=(
-                settings.pose3d_enabled and settings.pose3d_depth_view and settings.task == "pose"
-            ),
+            show_pose3d=settings.pose3d_enabled,
+            show_depth=settings.pose3d_enabled and settings.pose3d_depth_view,
             eye=settings.pose3d_eye,
             look_at=settings.pose3d_look_at,
             eye_up=settings.pose3d_eye_up,
@@ -298,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     # 单目 3D 骨架（只在 pose + rerun 都在时才有意义）
     depth_estimator = None
     tracker = None
-    if view is not None and settings.pose3d_enabled and settings.task == "pose":
+    if view is not None and settings.pose3d_enabled:
         from .depth import DepthEstimator
         from .pose import NUM_KEYPOINTS
         from .pose3d import Intrinsics, lift_keypoints, to_display, valid_mask
@@ -325,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"config: {args.config}")
     print(
-        f"run   : {settings.task}, detect {settings.detect_hz:g} Hz"
+        f"run   : pose {settings.detect_hz:g} Hz"
         f"（相机 {settings.camera_fps:g} fps 上限）, imgsz {settings.imgsz}, "
         f"conf {settings.conf:g}, 曝光 {settings.exposure_mode}, "
         f"feature {settings.feature or '[]'}"
@@ -349,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     # 帧到达时刻正好压在周期边界上时纯靠抖动决定去留，会白丢约一半的帧
     # （实测 15/15 与 30/15 都会），所以留一点容差。倍数在 config.toml 里。
     min_gap = period * settings.rate_tolerance
-    # 深度模型的频率与 detect 分开：它比 pose 贵，没必要跟满
+    # 深度模型的频率与 pose 分开：它比 pose 贵，没必要跟满
     period_3d = 1.0 / settings.pose3d_hz if settings.pose3d_hz > 0 else 0.0
     t_last_3d = 0.0
     processed = skipped = 0
@@ -405,10 +382,9 @@ def main(argv: list[str] | None = None) -> int:
             camera_settings = cam.settings()
             print("camera: " + ", ".join(f"{k}={v}" for k, v in camera_settings.items()))
             print(
-                f"model : {estimator.weights} task={settings.task} classes={estimator.names} "
-                f"device={estimator.device}"
+                f"model : {estimator.weights} classes={estimator.names} device={estimator.device}"
             )
-            print(f"running: {settings.task} {settings.detect_hz:g} Hz, Ctrl-C 退出")
+            print(f"running: pose {settings.detect_hz:g} Hz, Ctrl-C 退出")
 
             while True:
                 frame = cam.read(timeout_ms=settings.read_timeout_ms)
@@ -431,10 +407,7 @@ def main(argv: list[str] | None = None) -> int:
 
                 if view is not None:
                     # 送相机原图；框/关键点/骨架由 rerun 用结构化数据画
-                    if settings.task == "pose":
-                        view.log_frame(frame, frame.bgr, poses=instances)
-                    else:
-                        view.log_frame(frame, frame.bgr, detections=instances)
+                    view.log_frame(frame, frame.bgr, poses=instances)
                 if count and count != last_count:
                     print(
                         f"[{time.strftime('%H:%M:%S')}] person x{count} "

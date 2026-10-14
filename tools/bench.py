@@ -15,8 +15,8 @@ from ctypes import POINTER, c_ubyte
 
 from hik_person.colors import bgr_to_rgb, pixel_type_name
 from hik_person.config import default_config_path, load_settings, resolve_path
-from hik_person.detect import PersonDetector
 from hik_person.mvs import Camera, load_sdk
+from hik_person.pose import PoseEstimator
 
 
 def timed(fn, repeat):
@@ -52,14 +52,15 @@ def main() -> int:
         print(f"warning: {warning}", file=sys.stderr)
 
     sdk = load_sdk()
-    detector = PersonDetector(
+    estimator = PoseEstimator(
         resolve_path(args.weights or settings.weights),
         device=args.device if args.device is not None else (settings.device or None),
         imgsz=args.imgsz or settings.imgsz,
+        kpt_conf=settings.kpt_conf,
     )
     camera_fps = args.camera_fps if args.camera_fps is not None else settings.camera_fps
     serial = args.serial or settings.serial
-    print(f"device={detector.device} imgsz={detector.imgsz} frames={args.frames}")
+    print(f"device={estimator.device} imgsz={estimator.imgsz} frames={args.frames}")
 
     with Camera(sdk, serial=serial or None) as cam:
         cam.configure(
@@ -93,8 +94,8 @@ def main() -> int:
         report("BGR -> RGB（rerun 需要）", timed(lambda: bgr_to_rgb(bgr), args.frames))
         report("取一帧（含等帧）", timed(lambda: cam.read(), args.frames))
 
-        detector(bgr)  # warmup
-        report("YOLO 推理", timed(lambda: detector(bgr), min(args.frames, 20)))
+        estimator(bgr)  # warmup
+        report("YOLO pose 推理", timed(lambda: estimator(bgr), min(args.frames, 20)))
 
     return 0
 

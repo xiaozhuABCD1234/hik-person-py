@@ -1,6 +1,6 @@
 # hik-person-py
 
-HIKROBOT（海康）工业相机 → YOLO 人体检测 → [Rerun](https://rerun.io) 可视化。
+HIKROBOT（海康）工业相机 → YOLO 姿态（骨架）→ [Rerun](https://rerun.io) 可视化。
 取流直接用 MVS SDK。
 
 **参数都在 [`config.toml`](config.toml) 里，代码里不写死。** 命令行只做临时覆盖。
@@ -15,7 +15,8 @@ uv run hik-person --show-config      # 打印合并后的生效参数
 uv run hik-person                    # 按 config.toml 跑（开 rerun 窗口）
 uv run hik-person --duration 30      # 临时覆盖某一项
 uv run hik-person --no-rerun --max-frames 300     # 只看结果，不开窗口不写文件
-uv run hik-person --task detect --weights models/best.pt        # 换成自训练的检测模型
+uv run hik-person --weights models/yolo26n-pose.pt   # 换 n 档姿态权重（快一倍）
+uv run hik-person --no-pose3d        # 关掉 3D 小窗，不加载深度模型
 ```
 
 ## 参数文件
@@ -24,7 +25,7 @@ uv run hik-person --task detect --weights models/best.pt        # 换成自训�
 
 ```toml
 [camera]
-serial = "DB1505178"          # 本机 MV-CB016-10UC-S
+serial = "DA2360141"          # 本机 MV-CS016-10UC；另一台用 --serial 指
 camera_fps = 30.0             # 采集帧率上限
 exposure_mode = "sdk"         # sdk = 相机自动曝光/增益；manual = 用下面的固定值
 brightness = 110.0            # AE 目标灰度（写进相机的 Brightness 特性）
@@ -35,12 +36,11 @@ gain_db = -1.0                # manual 模式：-1 = 用设备当前值（0 dB �
 feature = ["ADCBitDepth=Bits_8"]   # 任意 GenICam 特性（写别的机型的符号名也会自动改写）
 
 [detector]
-# detect = 人体检测框；pose = 关键点/骨架（切任务时 weights 也要一起改）
-task = "pose"
-weights = "models/yolo26n-pose.pt"   # 相对路径按项目根解析；detect 用 models/best.pt
+# 只有一条任务线：姿态模型给检测框 + 17 个 COCO 关键点与骨架
+weights = "models/yolo26m-pose.pt"   # 相对路径按项目根解析；n/s/m/l/x 同一 API
 conf = 0.35
 imgsz = 640
-kpt_conf = 0.5                # 仅 pose：关键点置信度阈值
+kpt_conf = 0.5                # 关键点置信度阈值
 
 [run]
 detect_hz = 15.0
@@ -51,9 +51,9 @@ enabled = true
 save = ""                     # 非空则写 .rrd 且不弹窗口
 
 [pose3d]
-# 单目 3D 骨架：yolo26n-depth 给 pose 的关键点补一个 z，rerun 右下角开个小窗画 3D
+# 单目 3D 骨架：yolo26*-depth 给 17 个关键点补一个 z，rerun 右下角开个小窗画 3D
 enabled = true
-weights = "models/yolo26s-depth.pt"   # n/s/m/l/x 同一 API；s 比 n 略准
+weights = "models/yolo26m-depth.pt"   # n/s/m/l/x 同一 API；m 比 s 更准
 imgsz = 640                   # 深度推理输入边长（输出会自动缩回原分辨率）
 hz = 15.0                     # 3D 骨架更新频率（深度模型比 pose 贵，不用跟满）
 fov_deg = 60.0                # 相机没标定，按水平视场角估内参
@@ -77,7 +77,7 @@ warning: 未知配置项 [rerun].enable，已忽略
 
 命令行覆盖（`--help` 有全部）：`--serial --index --camera-fps --exposure-us --gain-db
 --brightness --exposure-start-us --exposure-fps-headroom --read-timeout-ms --feature
---weights --conf --iou --imgsz --device --detect-hz --duration --max-frames --save-dir
+--weights --conf --imgsz --device --kpt-conf --detect-hz --duration --max-frames --save-dir
 --rerun/--no-rerun --rerun-save`。收到命令行没给的项一律保留配置文件/兜底值，所以
 `--gain-db 0` 和"没给增益"是两件事。
 
@@ -155,20 +155,21 @@ error: 设置特性 ADCBitDepth=Bits_10 失败（按 enum=0x80000004 依次试�
 | `0x80000004` | `MV_E_PARAMETER` | **节点在，但符号名不在它的枚举表里** |
 | `0x80000025` | `MV_E_PARAMETER_RANGE` | 数值超出该特性的范围 |
 
-## 任务：检测框 or 关键点
+## 模型：YOLO 姿态
 
-`[detector].task` 决定跑哪条任务线，两者共用取流、测光、人数统计与 rerun 布局：
+`[detector].weights` 指到哪个姿态权重就跑哪个：输出都是检测框 + 17 个 COCO 关键点与骨架，
+差别只在精度和延迟（本机 RTX 4060 Laptop，`imgsz 640`）：
 
-| `task` | `weights` | 输出 |
+| `weights` | 延迟 | 说明 |
 |---|---|---|
-| `pose`（默认） | `models/yolo26n-pose.pt` | 检测框 + 17 个 COCO 关键点与骨架 |
-| `detect` | `models/best.pt` | 只要人体检测框 |
+| `models/yolo26n-pose.pt` | 7.4 ms | n 档，最快 |
+| `models/yolo26m-pose.pt`（默认） | 16.6 ms | m 档，精度明显更好，仍远低于 15 Hz 的 66 ms 预算 |
 
 ```bash
-uv run hik-person --task pose --weights models/yolo26n-pose.pt
+uv run hik-person --weights models/yolo26n-pose.pt
 ```
 
-姿态线用 ultralytics 的 `yolo26n-pose`（`kpt_shape=[17,3]`，单类 person）。骨架表在
+权重是 ultralytics 的 pose 任务（`kpt_shape=[17,3]`，单类 person）。骨架表在
 `pose.SKELETON_17`（19 根骨头，0-based）——注意 ultralytics 自己的 skeleton 是 **1-based**
 （那边用 `sk[0]-1` 取），抄表时很容易多一根或少一根，所以单元测试里卡了骨头数、索引范围、
 每个关键点至少出现在一根骨头里。
@@ -299,10 +300,10 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 
 ### 单目 3D 骨架（右下角小窗）
 
-`[pose3d].enabled = true`（且 `task = "pose"`）时，左上/左下是原图与估计深度图，右上/右下
+`[pose3d].enabled = true` 时，左上/左下是原图与估计深度图，右上/右下
 是人数曲线与 `Spatial3DView` 3D 骨架；关掉就用 `--no-pose3d`，不会加载深度模型。
 
-做法：`yolo26n-pose` 出 17 个像素关键点，`yolo26n-depth` 出同一帧的公制深度图，在每个
+做法：pose 权重出 17 个像素关键点，`yolo26*-depth` 出同一帧的公制深度图，在每个
 关键点像素附近取窗口中位数当 z，再用针孔模型（按 `fov_deg` 估的内参）还原成**相机坐标系**
 （`X` 右 / `Y` 下 / `Z` 前，即 rerun 的 `RIGHT_HAND_Y_DOWN`）。关键点要“置信度过阈值
 **且**深度有效”才画，缺一个就不画。
@@ -329,12 +330,13 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 | 配置 | 延迟 | abs_rel vs m@768 ↓ | δ1 vs m@768 ↑ |
 |---|---|---|---|
 | n@320 | 4.5 ms | 0.129 | 0.751 |
-| **s@640（默认）** | 10.0 ms | 0.082 | 0.948 |
+| s@640 | 10.0 ms | 0.082 | 0.948 |
 | n@640 | 7.7 ms | 0.061 | 0.965 |
-| m@640 | 17.4 ms | 0.036 | 0.998 |
+| **m@640（默认）** | 17.4 ms | 0.036 | 0.998 |
 
-主要收益来自 **imgsz**（权重在 768 训练/评测，320 没喂饱），不是换大模型。要换只改
-`[pose3d].weights` / `imgsz`。另外官方的绝对尺度是全局标定，可以用 `YOLO(...).calibrate()`
+`[pose3d].weights` / `imgsz` 想换就换：默认 m@640；省算力可以退到 s@640 / n@640。
+注意精度主要是被 **imgsz** 卡住的（权重在 768 训练/评测，320 远没喂饱），所以
+`imgsz` 降到 320 掉得比换个更大的模型还快。另外官方的绝对尺度是全局标定，可以用 `YOLO(...).calibrate()`
 拿本相机几个实测点重标（文档：5 点/图、100+ 图可到全量拟合的 1% 内）。
 
 * 弹窗模式下 viewer 是**独立进程**，会继承当前终端；在脚本/管道里跑就用 `--rerun-save`，
@@ -374,7 +376,6 @@ src/hik_person/
 ├── config.py    config.toml 读取 / 命令行覆盖 / 路径解析
 ├── colors.py    像素格式映射 + Bayer/BGR/RGB 转换
 ├── mvs.py       MVS 运行时环境、枚举、取流、测光、特性改写
-├── detect.py    ultralytics YOLO 人体检测
 ├── pose.py      ultralytics YOLO 姿态（COCO-17 骨架）
 ├── viz.py       rerun 记录与布局（Image / Boxes2D / Points2D / LineStrips2D / Scalars）
 └── __main__.py  CLI，只负责把参数接起来
@@ -382,8 +383,10 @@ tools/
 ├── check_colors.py  颜色链路对比验证
 └── bench.py         分环节计时
 models/
-├── yolo26n-pose.pt  姿态权重（默认）
-└── best.pt          自训练的人体检测权重
+├── yolo26m-pose.pt   姿态权重（默认）
+├── yolo26m-depth.pt  单目深度权重（默认，[pose3d]）
+├── yolo26n-pose.pt   n 档姿态权重（更快）
+└── yolo26s-depth.pt  s 档深度权重（更快）
 ```
 
 ## 实测性能（1440×1080 + RTX 4060 Laptop）
@@ -394,11 +397,13 @@ models/
 |---|---|
 | SDK 转 BGR（纯计算，不含等帧） | 1.1 ms |
 | BGR → RGB（rerun 需要） | 0.08 ms |
-| YOLO 推理（`imgsz 640`, `cuda:0`） | 4.3 ms |
+| YOLO pose 推理（`yolo26m-pose`, `imgsz 640`, `cuda:0`） | 16.6 ms |
+| 深度推理（`yolo26m-depth`, `imgsz 640`，按 `pose3d.hz` 单独限速） | 22.0 ms |
 | 取一帧（含等帧） | 33 ms = 相机帧间隔 |
 
-单帧计算约 5.5 ms，瓶颈在相机节拍，不在模型。主循环按 `detect_hz` 限速，且只处理最新的
-帧（不积压）：相机开到 249 fps 也只按 15 Hz 推理。
+单帧计算约 18 ms（再叠上按 `pose3d.hz` 跑的深度模型约 39 ms），仍低于 15 Hz 的 66 ms
+预算，瓶颈在相机节拍而不在模型。主循环按 `detect_hz` 限速，且只处理最新的帧（不积压）：
+相机开到 249 fps 也只按 15 Hz 推理。
 
 `camera_fps` 建议取 `detect_hz` 的 2 倍以上（例如 30 / 15，实测端到端 13~14 fps、每两帧
 推理一次）。两者相等时帧到达时刻正好压在周期边界上，所以留了 `rate_tolerance` 容差。
@@ -428,6 +433,6 @@ AGPL-3.0-or-later，全文见 [LICENSE](LICENSE)。
 
 - 依赖 [ultralytics](https://github.com/ultralytics/ultralytics)（AGPL-3.0），
   本项目因此采用同一许可证。对外分发、或以网络服务形式提供时，需按 AGPL 提供源码。
-- `models/yolo26n-pose.pt` 为默认权重（ultralytics 官方姿态模型）；`models/best.pt` 是自训练的检测权重，随仓库一同提供。
+- `models/yolo26m-pose.pt` / `models/yolo26m-depth.pt` 为默认权重（ultralytics 官方姿态/深度模型）；n-pose / s-depth 也随仓库一同提供，换 `weights` 即可回退。
 - 运行需要海康 **MVS SDK**（`/opt/MVS`）。它是海康的专有软件，不在本仓库内，
   也不由本许可证覆盖；使用它需遵守海康自己的许可条款。

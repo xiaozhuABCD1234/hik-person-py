@@ -51,7 +51,6 @@ feature = ["ADCBitDepth=Bits_8", "GammaEnable=true"]
 [detector]
 weights = "models/other.pt"
 conf = 0.5
-iou = 0.4
 imgsz = 480
 device = "cpu"
 
@@ -101,6 +100,16 @@ def test_unknown_key_is_warned_not_silently_ignored(tmp_path) -> None:
     settings, warnings = load_settings(path)
     assert settings.serial == "ok"
     assert any("未知配置项 [camera].serail" in w for w in warnings)
+
+
+def test_removed_detect_keys_are_warned_with_a_hint(tmp_path) -> None:
+    """detect 任务删了：旧配置里的 task/iou 要报"已移除"，不能混成"拼错了"。"""
+    path = write_config(tmp_path, '[detector]\ntask = "pose"\niou = 0.5\nweights = "x.pt"\n')
+    settings, warnings = load_settings(path)
+    assert settings.weights == "x.pt"
+    assert any("[detector].task 已移除" in w for w in warnings)
+    assert any("[detector].iou 已移除" in w for w in warnings)
+    assert not any("未知配置项 [detector]" in w for w in warnings)
 
 
 def test_wrong_type_warns_and_keeps_default(tmp_path) -> None:
@@ -171,7 +180,7 @@ def test_cli_can_disable_rerun() -> None:
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("models/best.pt", PROJECT_ROOT / "models/best.pt"),
+        ("models/yolo26m-pose.pt", PROJECT_ROOT / "models/yolo26m-pose.pt"),
         ("/abs/path.pt", Path("/abs/path.pt")),
     ],
 )

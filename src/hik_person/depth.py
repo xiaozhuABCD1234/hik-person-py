@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""单目深度估计（yolo26n-depth）：给 2D 关键点补一个 z 坐标。
+"""单目深度估计（yolo26*-depth）：给 2D 关键点补一个 z 坐标。
 
 `ultralytics` 的 depth 任务输出一张与原图同分辨率的公制深度图（米）。它不是标定过的
 双目/结构光深度，只是模型从单张图里估的，绝对尺度会有出入；用来把骨架立起来看结构

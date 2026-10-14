@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""YOLO 姿态估计（骨架关键点），与 detect.py 同一套输入输出约定。
+"""YOLO 姿态估计（骨架关键点）。
 
 骨架与关键点名字取自 ultralytics：
 `ultralytics/utils/plotting.py` 的 `Annotator.skeleton` 是 **1-based** 的

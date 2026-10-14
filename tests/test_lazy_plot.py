@@ -7,7 +7,7 @@
 * ``__call__`` 只返回 ultralytics 的 ``Results``，**绝不**调用 ``plot()``；
 * 只有显式 ``annotate(result)`` 才画（存盘路径用）。
 
-用鸭子类型的假 ``Results`` 构造 estimator，不加载 YOLO、不需要相机。
+用鸭子类型的假 ``Results`` 构造 pose estimator，不加载 YOLO、不需要相机。
 """
 
 from __future__ import annotations
@@ -15,9 +15,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 
-from hik_person.detect import PersonDetector
 from hik_person.pose import PoseEstimator
 
 
@@ -48,28 +46,12 @@ def exploding_plot():
     raise AssertionError("__call__ 里不该调 result.plot()；标注图要按需生成")
 
 
-def make_detector(result) -> PersonDetector:
-    detector = object.__new__(PersonDetector)
-    detector.model = SimpleNamespace(predict=lambda *a, **k: [result])
-    detector.device, detector.conf, detector.iou, detector.imgsz = "cpu", 0.35, 0.5, 640
-    detector.names = {0: "person"}
-    detector.classes = [0]
-    return detector
-
-
 def make_pose_estimator(result) -> PoseEstimator:
     estimator = object.__new__(PoseEstimator)
     estimator.model = SimpleNamespace(predict=lambda *a, **k: [result])
     estimator.device, estimator.conf, estimator.imgsz, estimator.kpt_conf = "cpu", 0.35, 640, 0.5
     estimator.weights, estimator.names = "fake.pt", {0: "person"}
     return estimator
-
-
-def detect_result() -> SimpleNamespace:
-    return SimpleNamespace(
-        boxes=Boxes([[0, 0, 10, 10]], [0.9], [0]),
-        plot=exploding_plot,
-    )
 
 
 def pose_result() -> SimpleNamespace:
@@ -83,14 +65,6 @@ def pose_result() -> SimpleNamespace:
     )
 
 
-def test_detect_call_does_not_plot() -> None:
-    result = detect_result()
-    detections, returned = make_detector(result)(np.zeros((8, 8, 3), np.uint8))
-    assert returned is result
-    assert [d.label for d in detections] == ["person"]
-    assert detections[0].conf == pytest.approx(0.9)
-
-
 def test_pose_call_does_not_plot() -> None:
     result = pose_result()
     poses, returned = make_pose_estimator(result)(np.zeros((8, 8, 3), np.uint8))
@@ -100,13 +74,6 @@ def test_pose_call_does_not_plot() -> None:
 
 
 def test_annotate_renders_on_demand() -> None:
-    result = detect_result()
-    result.plot = lambda: np.zeros((8, 8, 3), np.uint8)
-    detector = make_detector(result)
-    annotated = detector.annotate(result)
-    assert annotated.shape == (8, 8, 3)
-    assert annotated.flags["C_CONTIGUOUS"]
-
     pose = pose_result()
     pose.plot = lambda: np.ones((8, 8, 3), np.uint8)
     estimator = make_pose_estimator(pose)
