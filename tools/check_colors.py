@@ -49,6 +49,12 @@ def main() -> int:
     with Camera(sdk, serial=args.serial) as cam:
         cam.configure(exposure_us=8000.0, fps=15.0)
         cam.start()
+        # 先测光，否则存下来的图是黑的，不好肉眼比对颜色
+        metered = cam.auto_expose(target=110.0, exposure_upper_us=0.9e6 / 15.0)
+        print(
+            f"测光: 曝光 {metered['exposure_us']:.0f} us，增益 {metered['gain_db']:.2f} dB，"
+            f"灰度 {metered['brightness']:.1f}"
+        )
 
         got = None
         for _ in range(100):

@@ -9,6 +9,7 @@ ensure_runtime_environment() 在环境不满足时用 os.execve 重启自己，
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 from ctypes import POINTER, byref, c_ubyte, cast, memset, sizeof
@@ -160,6 +161,47 @@ def list_devices(sdk) -> list[Device]:
     return devices
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def next_exposure_step(
+    mean: float,
+    target: float,
+    exposure_us: float,
+    gain_db: float,
+    *,
+    exposure_min_us: float,
+    exposure_max_us: float,
+    gain_min_db: float,
+    gain_max_db: float,
+) -> tuple[float, float]:
+    """测光的下一步：先动曝光，曝光到上限（受帧率约束）后再用增益补。
+
+    亮度近似为 ``k * 曝光 * 10**(增益/20)``，所以需要的倍数直接取 ``target / mean``；
+    曝光被夹住时，剩下的倍数换成 dB：``20 * log10(剩余倍数)``。
+
+    纯函数，方便单测。
+    """
+    ratio = target / max(mean, 1.0)
+    needed = exposure_us * ratio
+
+    if mean < target:
+        if needed <= exposure_max_us:
+            return max(exposure_min_us, needed), gain_db
+        # 曝光顶到上限，剩余亮度用增益补
+        residual = ratio * exposure_us / exposure_max_us
+        gain = min(gain_max_db, gain_db + 20.0 * math.log10(max(residual, 1e-6)))
+        return exposure_max_us, _clamp(gain, gain_min_db, gain_max_db)
+
+    if needed >= exposure_min_us:
+        return needed, gain_db
+    # 曝光已经到下限（帧率上限要求足够短的曝光），只能降增益
+    residual = ratio * exposure_us / exposure_min_us
+    gain = max(gain_min_db, gain_db + 20.0 * math.log10(max(residual, 1e-6)))
+    return exposure_min_us, _clamp(gain, gain_min_db, gain_max_db)
+
+
 class Camera:
     """最小可用的 MVS 取流封装。"""
 
@@ -224,10 +266,10 @@ class Camera:
         self,
         *,
         exposure_us: float = 0.0,
-        gain_db: float = 0.0,
+        gain_db: float = -1.0,
         fps: float = 0.0,
         exposure_auto: str | None = "Off",
-        gain_auto: str | None = None,
+        gain_auto: str | None = "Off",
         bayer_quality: int = 1,
         grab_strategy: str = "LatestImagesOnly",
         buffer_count: int = 3,
@@ -251,9 +293,11 @@ class Camera:
             )
         if gain_auto:
             hard(cam.MV_CC_SetEnumValueByString("GainAuto", gain_auto), "GainAuto")
+        # 曝光/增益：<=0 与 <0 分别表示“保持设备值”。增益的 0 dB 是合法值（最小值），
+        # 所以它不能用 0 当哨兵值。
         if exposure_us > 0:
             hard(cam.MV_CC_SetFloatValue("ExposureTime", exposure_us), "ExposureTime")
-        if gain_db > 0:
+        if gain_db >= 0:
             hard(cam.MV_CC_SetFloatValue("Gain", gain_db), "Gain")
 
         # 自由运行
@@ -324,6 +368,135 @@ class Camera:
         ret = self.cam.MV_CC_StartGrabbing()
         if ret != 0:
             raise MvsError(f"MV_CC_StartGrabbing failed: 0x{ret & 0xFFFFFFFF:08x}")
+
+    # ------------------------------------------------------------ 曝光/增益
+    def _float_range(self, key: str) -> tuple[float, float, float] | None:
+        st = self.sdk.MVCC_FLOATVALUE()
+        if self.cam.MV_CC_GetFloatValue(key, st) != 0:
+            return None
+        return float(st.fCurValue), float(st.fMin), float(st.fMax)
+
+    def set_exposure_us(self, microseconds: float) -> None:
+        ret = self.cam.MV_CC_SetFloatValue("ExposureTime", float(microseconds))
+        if ret != 0:
+            raise MvsError(f"设置 ExposureTime={microseconds:g}us 失败: 0x{ret & 0xFFFFFFFF:08x}")
+
+    def set_gain_db(self, db: float) -> None:
+        ret = self.cam.MV_CC_SetFloatValue("Gain", float(db))
+        if ret != 0:
+            raise MvsError(f"设置 Gain={db:g}dB 失败: 0x{ret & 0xFFFFFFFF:08x}")
+
+    def brightness(self, frames: int = 3, timeout_ms: int = 1000) -> float:
+        """取若干帧原始平面的平均灰度（0-255），用于测光。
+
+        直接用未转换的 Bayer/灰度平面，不做去马赛克，测光够用且很快。
+        """
+        values = []
+        for _ in range(frames):
+            raw = self.read_raw(timeout_ms)
+            if raw is not None:
+                values.append(float(raw[0].mean()))
+        if not values:
+            raise MvsError("测光失败：取不到帧")
+        return sum(values) / len(values)
+
+    def auto_expose(
+        self,
+        *,
+        target: float = 110.0,
+        tolerance: float = 12.0,
+        exposure_upper_us: float | None = None,
+        gain_max_db: float | None = None,
+        max_iters: int = 10,
+        settle_frames: int = 2,
+        measure_frames: int = 3,
+        verbose=None,
+    ) -> dict:
+        """闭环测光：调整曝光，曝光到上限后再用增益补。
+
+        本机型没有 Brightness（目标灰度）特性，相机的 ExposureAuto/GainAuto 无法指定
+        目标值，所以只能自己量灰度、自己算。曝光上限默认由调用方按帧率约束传进来
+        （曝光越长，能达到的最高帧率越低）；增益上限默认取设备的 Gain 最大值。
+
+        返回 {exposure_us, gain_db, brightness, iterations, reached, reason, history}；
+        reason 是 converged / at_limits / max_iters。
+        """
+        cam = self.cam
+
+        def must(ret, what):
+            if ret != 0:
+                raise MvsError(f"{what} failed: 0x{ret & 0xFFFFFFFF:08x}")
+
+        # 必须先关掉自动曝光/增益，否则手动写的值会被相机自己覆盖回去
+        must(cam.MV_CC_SetEnumValueByString("ExposureAuto", "Off"), "ExposureAuto=Off")
+        must(cam.MV_CC_SetEnumValueByString("GainAuto", "Off"), "GainAuto=Off")
+
+        exposure_range = self._float_range("ExposureTime")
+        gain_range = self._float_range("Gain")
+        if exposure_range is None or gain_range is None:
+            raise MvsError("读不到 ExposureTime / Gain 的取值范围")
+        exposure_min_us, exposure_max_dev = exposure_range[1], exposure_range[2]
+        gain_min_db, gain_max_dev = gain_range[1], gain_range[2]
+
+        exposure_upper_us = (
+            exposure_max_dev if exposure_upper_us is None else float(exposure_upper_us)
+        )
+        exposure_upper_us = _clamp(exposure_upper_us, exposure_min_us, exposure_max_dev)
+        gain_ceiling = gain_max_dev if gain_max_db is None else min(gain_max_db, gain_max_dev)
+
+        exposure_us = _clamp(exposure_range[0], exposure_min_us, exposure_upper_us)
+        gain_db = _clamp(gain_range[0], gain_min_db, gain_ceiling)
+
+        history: list[dict] = []
+        reached = False
+        reason = "max_iters"
+        for _ in range(max_iters):
+            self.set_exposure_us(exposure_us)
+            self.set_gain_db(gain_db)
+            for _ in range(settle_frames):
+                self.read_raw()  # 丢掉切换设置后的过渡帧
+            mean = self.brightness(measure_frames)
+            history.append(
+                {
+                    "exposure_us": round(exposure_us, 1),
+                    "gain_db": round(gain_db, 2),
+                    "brightness": round(mean, 1),
+                }
+            )
+            if verbose:
+                verbose(
+                    f"  测光 {len(history):2d}: 曝光 {exposure_us:8.1f} us  "
+                    f"增益 {gain_db:5.2f} dB  ->  灰度 {mean:6.1f}  (目标 {target:g})"
+                )
+            if abs(mean - target) <= tolerance:
+                reached = True
+                reason = "converged"
+                break
+            new_exposure, new_gain = next_exposure_step(
+                mean,
+                target,
+                exposure_us,
+                gain_db,
+                exposure_min_us=exposure_min_us,
+                exposure_max_us=exposure_upper_us,
+                gain_min_db=gain_min_db,
+                gain_max_db=gain_ceiling,
+            )
+            if abs(new_exposure - exposure_us) < 1e-9 and abs(new_gain - gain_db) < 1e-9:
+                # 曝光和增益都已经顶到边界，再迭代只是白跑
+                reason = "at_limits"
+                break
+            exposure_us, gain_db = new_exposure, new_gain
+
+        return {
+            "exposure_us": exposure_us,
+            "gain_db": gain_db,
+            "brightness": history[-1]["brightness"] if history else float("nan"),
+            "iterations": len(history),
+            "reached": reached,
+            "reason": reason,
+            "history": history,
+        }
 
     def read(self, timeout_ms: int = 1000) -> Frame | None:
         """取一帧（含 SDK 转 BGR8）；没有数据返回 None。"""

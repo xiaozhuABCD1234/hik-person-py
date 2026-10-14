@@ -48,8 +48,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--detect-hz", type=float, default=15.0, help="推理/可视化频率（相机更快就跳帧）"
     )
     p.add_argument("--camera-fps", type=float, default=15.0, help="相机帧率上限，0 = 保持设备设置")
-    p.add_argument("--exposure-us", type=float, default=8000.0, help="曝光(us)，0 = 保持设备设置")
-    p.add_argument("--gain-db", type=float, default=0.0, help="增益(dB)，0 = 保持设备设置")
+    p.add_argument(
+        "--brightness",
+        type=float,
+        default=110.0,
+        help="测光目标：平均灰度 0-255。0 = 关闭测光，直接用 --exposure-us/--gain-db",
+    )
+    p.add_argument(
+        "--exposure-us",
+        type=float,
+        default=8000.0,
+        help="曝光(us)，0 = 用设备当前值；测光开启时作为起始值",
+    )
+    p.add_argument(
+        "--gain-db",
+        type=float,
+        default=-1.0,
+        help="增益 dB（该机型 0~17）。0 是合法值；-1 = 用设备当前值。测光开启时作为起始值",
+    )
     p.add_argument("--no-rerun", action="store_true", help="不开 rerun，只打印")
     p.add_argument(
         "--rerun-save",
@@ -121,17 +137,50 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         with Camera(sdk, serial=args.serial or None, index=args.index) as cam:
-            settings = cam.configure(
-                exposure_us=args.exposure_us, gain_db=args.gain_db, fps=args.camera_fps
-            )
+            cam.configure(exposure_us=args.exposure_us, gain_db=args.gain_db, fps=args.camera_fps)
             for note in cam.notes:
                 print(f"warning: {note}", file=sys.stderr)
+            cam.start()
+
+            # 测光：这台相机没有 Brightness（目标灰度）特性，相机的自动曝光无法指定目标，
+            # 所以自己量灰度、自己算。曝光上限按帧率约束，曝光写不下再用增益补。
+            if args.brightness > 0:
+                exposure_upper = 0.9e6 / args.camera_fps if args.camera_fps > 0 else None
+                print(
+                    f"测光: 目标灰度 {args.brightness:g}，曝光上限 "
+                    + (
+                        f"{exposure_upper:.0f} us（受 --camera-fps {args.camera_fps:g} 约束）"
+                        if exposure_upper
+                        else "设备最大值"
+                    )
+                )
+                metered = cam.auto_expose(
+                    target=args.brightness,
+                    exposure_upper_us=exposure_upper,
+                    verbose=print,
+                )
+                print(
+                    f"  -> 曝光 {metered['exposure_us']:.0f} us，"
+                    f"增益 {metered['gain_db']:.2f} dB，灰度 {metered['brightness']:.1f}"
+                )
+                if not metered["reached"]:
+                    why = {
+                        "at_limits": "曝光与增益都已到边界",
+                        "max_iters": f"{metered['iterations']} 次迭代仍未收敛",
+                    }.get(metered["reason"], metered["reason"])
+                    print(
+                        f"  警告: 没达到目标灰度（{metered['brightness']:.1f} / 目标 "
+                        f"{args.brightness:g}）：{why}。光线不够，"
+                        f"或者 --camera-fps 太高压住了曝光上限",
+                        file=sys.stderr,
+                    )
+
+            settings = cam.settings()
             print("camera: " + ", ".join(f"{k}={v}" for k, v in settings.items()))
             print(
                 f"model : {detector.weights} classes={detector.names} "
                 f"filter={detector.classes} device={detector.device}"
             )
-            cam.start()
             print(f"running: detect {args.detect_hz:g} Hz, Ctrl-C 退出")
 
             while True:
