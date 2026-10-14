@@ -7,12 +7,14 @@
 [camera]
 # 本机 MV-CB016-10UC-S；用 `uv run hik-person --list` 看所有可选相机。
 # 留空则按下面的 index 在"物理相机"里数（虚拟相机不占号）。
-serial = "DB1505178"
+# 另一台 MV-CS016-10UC（DA2360141）用 --serial 指即可；`feature` 的符号名会自动
+# 换成该机型认的那个，不用改这个文件。
+serial = "DA2360141"
 index = 0
 
 # 采集帧率上限（0 = 保持设备设置）。这台机型的实际上限取决于 ADCBitDepth：
 # Bits_8 -> 249.1 fps，Bits_12 -> 165.4 fps，见下面的 feature。
-camera_fps = 30.0
+camera_fps = 60.0
 
 # 曝光/增益：
 #   "sdk"    = 用相机自己的自动曝光 + 自动增益（默认，推荐）
@@ -41,8 +43,15 @@ gain_db = -1.0
 read_timeout_ms = 1000
 
 # 任意 GenICam 特性，格式 "NAME=VALUE"。
-# ADCBitDepth=Bits_8 让这台相机从 165.4 fps 解锁到 249.1 fps（实测，需配合
-# camera_fps 一起放开）。不想动就设成空数组 []。
+# ADCBitDepth 让这台相机从 165.4 fps 解锁到 249.1 fps（两台机型都实测过，需配合
+# camera_fps 一起放开）。
+#
+# 符号名随机型不同（数值都是 0 = 8bit / 3 = 12bit）：
+#   MV-CB016-10UC-S（DB1505178）: Bits_8         / Bits_12          <- 本机
+#   MV-CS016-10UC  （DA2360141）: ADCBitDepth_8  / ADCBitDepth_12
+# 写错机型的名字不会报错也能跑：能确定是同一个设置就自动改写，并在日志里说清楚
+# （见 README）。名字里的数字对不上或多解时才会报 0x80000004。
+# 不想动就设成空数组 []。
 feature = ["ADCBitDepth=Bits_8"]
 
 [detector]
@@ -90,3 +99,42 @@ server_memory_limit = "512MB"
 jpeg_quality = 75
 # viewer 的端口；被占用时 rerun 会直接拿来用。
 port = 9876
+
+[pose3d]
+# 单目 3D 骨架：yolo26n-depth 给 pose 的 17 个关键点补一个 z，在 rerun 右下角
+# 的 Spatial3DView 小窗里画出来。只在 task = "pose" 且 rerun 开着时生效。
+# 深度是模型从单张图估的，绝对尺度会有出入；看骨架结构够用，别当测距。
+enabled = true
+
+# depth 权重（ultralytics 的 depth 任务模型）。相对路径按项目根解析。
+# n/s/m/l/x 都在同一个 API 下；这里选 s：官方 NYU δ1 比 n 高（0.896 vs 0.882），
+# 本机实测输入 640 时 ~10 ms（n 为 7.7 ms）。换模型只改这一行。
+weights = "models/yolo26s-depth.pt"
+# 深度推理的输入边长。权重是在 768 训练/评测的，320 远没喂饱：实测跟 m@768 的
+# 一致度从 0.75（320）跳到 0.96（640），收益比换大模型还大。深度模型不便宜，
+# 没必要跟满 detect_hz（见 hz）。
+imgsz = 640
+# 3D 骨架的更新频率（Hz）。深度模型不便宜，没必要跟满 detect_hz。
+# 0 = 每个推理帧都算。
+hz = 15.0
+# 假定的水平视场角（度）。相机没标定，只能按普通镜头估；
+# 用来把“像素 + 深度”还原成 3D 坐标，不准确主要影响骨架的胖瘦/远近感。
+fov_deg = 60.0
+
+# 左列下面再放一块估计深度图（Turbo 伪彩，悬停看米数）。
+depth_view = true
+
+# 固定 3D 视角（相机坐标系，米）：eye=眼位，look_at=看向的点，eye_up=上方向。
+# 不固定的话 rerun 会按数据包围盒自动取景，而深度逐帧抖动，画面会一直“自动缩放”。
+# 想换视角就改这三个数（Y 向下，所以上方向是 -Y）；viewer 里仍可鼠标拖。
+eye = [0.0, 0.0, -1.5]
+look_at = [0.0, 0.0, 2.5]
+eye_up = [0.0, -1.0, 0.0]
+
+# 卡尔曼滤波：每个人的每个 3D 关键点一个恒定速度滤波，平滑单目深度的抖动。
+# 跨帧配对靠检测框 IoU；没外部依赖。
+kalman = true
+# 过程噪声（加速度，m/s²）：越大越跟手、越不平滑。
+kalman_process = 10.0
+# 观测噪声（m）：越大越平滑（越信模型、越不信当前观测）。
+kalman_measurement = 0.1

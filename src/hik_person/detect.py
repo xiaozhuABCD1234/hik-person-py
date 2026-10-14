@@ -43,8 +43,13 @@ class PersonDetector:
             self.names
         )
 
-    def __call__(self, bgr: np.ndarray) -> tuple[list[Detection], np.ndarray]:
-        """输入 BGR uint8，返回 (检测列表, 画好框的 BGR 图)。"""
+    def __call__(self, bgr: np.ndarray) -> tuple[list[Detection], object]:
+        """输入 BGR uint8，返回 (检测列表, ultralytics Results)。
+
+        不再无条件 ``result.plot()``：把框画进 1440×1080 整图很贵，而 rerun 侧会用
+        ``Boxes2D`` 结构化数据重画一遍，等于同一份信息画两遍、传两遍。只有要存盘时
+        才调 ``annotate()`` 按需生成标注图。
+        """
         result = self.model.predict(
             bgr,
             conf=self.conf,
@@ -65,4 +70,8 @@ class PersonDetector:
                 boxes.xyxy.tolist(), boxes.conf.tolist(), boxes.cls.tolist(), strict=True
             )
         ]
-        return detections, np.ascontiguousarray(result.plot())
+        return detections, result
+
+    def annotate(self, result) -> np.ndarray:
+        """把 Results 画成 BGR 标注图（框）。按需调用，别每帧调。"""
+        return np.ascontiguousarray(result.plot())

@@ -31,7 +31,7 @@ brightness = 110.0            # AE 目标灰度（写进相机的 Brightness 特
 auto_gain_max_db = 16.98      # AE 允许的最大增益
 exposure_us = 8000.0          # manual 模式：0 = 用设备当前值
 gain_db = -1.0                # manual 模式：-1 = 用设备当前值（0 dB 是合法最小值）
-feature = ["ADCBitDepth=Bits_8"]   # 任意 GenICam 特性
+feature = ["ADCBitDepth=Bits_8"]   # 任意 GenICam 特性（写别的机型的符号名也会自动改写）
 
 [detector]
 # detect = 人体检测框；pose = 关键点/骨架（切任务时 weights 也要一起改）
@@ -48,6 +48,21 @@ save_dir = ""
 [rerun]
 enabled = true
 save = ""                     # 非空则写 .rrd 且不弹窗口
+
+[pose3d]
+# 单目 3D 骨架：yolo26n-depth 给 pose 的关键点补一个 z，rerun 右下角开个小窗画 3D
+enabled = true
+weights = "models/yolo26s-depth.pt"   # n/s/m/l/x 同一 API；s 比 n 略准
+imgsz = 640                   # 深度推理输入边长（输出会自动缩回原分辨率）
+hz = 15.0                     # 3D 骨架更新频率（深度模型比 pose 贵，不用跟满）
+fov_deg = 60.0                # 相机没标定，按水平视场角估内参
+depth_view = true             # 左列再放一块估计深度图（Turbo 伪彩）
+eye = [0.0, 0.0, -1.5]        # 固定 3D 视角：眼位 / 视点 / 上方向（相机坐标系，米）
+look_at = [0.0, 0.0, 2.5]
+eye_up = [0.0, -1.0, 0.0]
+kalman = true                 # 3D 关键点卡尔曼滤波
+kalman_process = 10.0         # 过程噪声（m/s²）：越大越跟手
+kalman_measurement = 0.1      # 观测噪声（m）：越大越平滑
 ```
 
 写错的键名**会警告**而不是被静默忽略（参数文件最怕"改了没生效还不知道"）：
@@ -74,23 +89,70 @@ warning: 未知配置项 [rerun].enable，已忽略
 [1] usb   MV-CB016-10UC-S  sn=DB1505178
 [2] usb   MV-CS016-10UC    sn=Vir62953321  (虚拟, 打不开)
 ```
-
 `--feature NAME=VALUE` 可以写任意 GenICam 特性（可重复），按值的形态自动挑写入方式
-（布尔/整型/浮点/枚举），全失败时把每种尝试的错误码一起报出来：
+（布尔/整型/浮点/枚举）。写不进去也不能只报一个错误码 —— 它会探清楚这个特性是什么
+类型、认哪些符号。
 
 ```bash
 uv run hik-person --feature ADCBitDepth=Bits_8 --camera-fps 249 --brightness 0
 ```
 
-这台 **MV-CB016-10UC-S** 的实测 A/B（同一台、同一组其它参数，只换这一项）：
+### `ADCBitDepth`：8 bit 读数解锁 249 fps
 
-| `ADCBitDepth` | `resulting_fps` |
-|---|---|
-| `Bits_8` | **248.89** |
-| `Bits_12` | **165.37** |
+想跑到 249 fps 必须走 8 bit 读数；12 bit 会卡在 165.4（1440×1080 USB3 的读出上限）。
+8 bit 不改变载荷（`BayerRG8` 本来就是 8 bit/像素），代价是动态范围。两台机型实测：
 
-也就是 1440×1080 USB3 想跑到 249 fps 必须走 8 bit 读数；`Bits_12` 会卡在 165.4。
-`Bits_8` 不改变载荷（BayerRG8 本来就是 8 bit/像素），代价是动态范围。
+> 量这个要把曝光压短（用 `MVCC_FLOATVALUE` 固定到 500 us）。自动曝光开着时
+> `ResultingFrameRate` 是 `min(读出上限, 1/曝光)`，量到的是曝光不是读出能力 ——
+> 开着 AE 量出来的是 168 fps（≈ 1/6 ms），很容易误判成"这台机型 8 bit 也没用"。
+
+| `ADCBitDepth` | `MV-CB016-10UC-S` | `MV-CS016-10UC` |
+|---|---|---|
+| 8 bit（数值 0） | **249.10 fps** | **249.10 fps** |
+| 12 bit（数值 3） | 165.37 fps | 165.37 fps |
+
+#### 符号名随机型不同 —— 但程序会自己换
+
+同一个设置，两个型号的符号名不一样（数值都是 0/3）：
+
+| 机型 | 8 bit | 12 bit |
+|---|---|---|
+| `MV-CB016-10UC-S` | `Bits_8` | `Bits_12` |
+| `MV-CS016-10UC` | `ADCBitDepth_8` | `ADCBitDepth_12` |
+
+所以写错机型的名字不再需要手改 config：能确定是**同一个设置**就自动换成这台相机认的
+名字，并明确打印实际写了什么（免得不声不响地换掉用户的意图）：
+
+```
+$ uv run hik-person --feature ADCBitDepth=ADCBitDepth_8     # config 是 CB 机的名字，现在插的是 CS 机
+feature: ADCBitDepth=ADCBitDepth_8 (以 enum 写入；这台相机不叫 ADCBitDepth_8，
+已自动换成同一个设置的另一个名字)
+```
+
+自动改写故意做得很保守，两个条件都要求**名字里的数字不变**（8 bit 与 12 bit 不能搞混）：
+
+1. 去掉节点名后两边完全一样（`Auto` 对 `ADCBitDepth_Auto`）；
+2. 残部有一头是另一头的后缀，且尾部数字一样（`Bits_8` 对 `ADCBitDepth_8`）。
+
+命中多个候选（`Foo_8`/`Bar_8` 都对得上）、或数字对不上（`Bits_10` 对 `_8`）就不改，
+而是报错让人自己拍板：
+
+```
+$ uv run hik-person --feature ADCBitDepth=Bits_10
+error: 设置特性 ADCBitDepth=Bits_10 失败（按 enum=0x80000004 依次试过）：ADCBitDepth 是枚举特性，
+这台相机只认这些符号：ADCBitDepth_8 / ADCBitDepth_12（符号名随机型不同，别照抄别的相机的配置）
+```
+
+不依赖符号名的话，也可以直接写数值（`ADCBitDepth=0` = 8 bit），两台机型都认；
+代价是看不出这是什么设置。
+
+错误码的含义（程序探到类型后已经把常见情况分好了，可以直接对表）：
+
+| 错误码 | 含义 | 常见原因 |
+|---|---|---|
+| `0x80000109` | `MV_E_GC_NODE_NOT_FOUND` | 特性名拼写错，或节点不是这个类型 |
+| `0x80000004` | `MV_E_PARAMETER` | **节点在，但符号名不在它的枚举表里** |
+| `0x80000025` | `MV_E_PARAMETER_RANGE` | 数值超出该特性的范围 |
 
 ## 任务：检测框 or 关键点
 
@@ -200,6 +262,13 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 所以不改这两个默认值，跑几分钟 viewer 就会涨到几个 GB；而 rerun 落盘的 `.rrd` 看着小，
 是因为文件里又压了一道 —— **占内存的是 viewer 里那份解压后的数据**。
 
+### 框只画一遍（已修）
+
+以前一帧的信息被画了两遍、传了两遍：模型 `result.plot()` 先把框/骨架烧进整图（1440×1080
+的绘制 + 整图拷贝），rerun 又用 `Boxes2D`/`Points2D`/`LineStrips2D` 重画一遍。现在
+`camera/image` 只送相机原图，框/骨架一律由 rerun 结构化地画；`result.plot()` 改成
+`annotate()`，只在要存盘（`--save-dir`）时才调，推理主循环里不再有这项开销。
+
 ### 画面自己缩放（已修）
 
 不设 `visual_bounds` 时，rerun 的 2D 视图按“**视图内数据的包围盒**”自动取景。
@@ -211,12 +280,55 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 
 | 实体 | 内容 |
 |---|---|
-| `camera/annotated` | 标注图：模型画的框（pose 时含骨架），不在像素上额外烧字 |
-| `camera/annotated/boxes` | 同一批框的 `Boxes2D`，可悬停看标签与置信度 |
-| `camera/annotated/keypoints` | 仅 pose：关键点 `Points2D`，标签是 `nose`/`left_shoulder` 等 |
-| `camera/annotated/skeleton` | 仅 pose：骨架 `LineStrips2D`（两端都过 `kpt_conf` 才连） |
+| `camera/image` | 相机**原图**（不在像素上烧框/骨架，交给 rerun 按下面的结构化实体画） |
+| `camera/image/boxes` | 框的 `Boxes2D`，可悬停看标签与置信度 |
+| `camera/image/keypoints` | 仅 pose：关键点 `Points2D`，标签是 `nose`/`left_shoulder` 等 |
+| `camera/image/skeleton` | 仅 pose：骨架 `LineStrips2D`（两端都过 `kpt_conf` 才连） |
+| `camera/depth` | 仅 pose3d：估计深度图 `DepthImage`（Turbo 伪彩，送前先降采样） |
 | `person/count` | 人数曲线（右侧 TimeSeriesView） |
 | `person/events` | 人数变化日志（带各框置信度） |
+| `camera/pose3d/joints` | 仅 pose+pose3d：3D 关键点 `Points3D`（相机坐标，米） |
+| `camera/pose3d/skeleton` | 仅 pose+pose3d：3D 骨架 `LineStrips3D` |
+
+### 单目 3D 骨架（右下角小窗）
+
+`[pose3d].enabled = true`（且 `task = "pose"`）时，左上/左下是原图与估计深度图，右上/右下
+是人数曲线与 `Spatial3DView` 3D 骨架；关掉就用 `--no-pose3d`，不会加载深度模型。
+
+做法：`yolo26n-pose` 出 17 个像素关键点，`yolo26n-depth` 出同一帧的公制深度图，在每个
+关键点像素附近取窗口中位数当 z，再用针孔模型（按 `fov_deg` 估的内参）还原成**相机坐标系**
+（`X` 右 / `Y` 下 / `Z` 前，即 rerun 的 `RIGHT_HAND_Y_DOWN`）。关键点要“置信度过阈值
+**且**深度有效”才画，缺一个就不画。
+
+几个刻意的选择：
+
+* **固定视角**：不设 `eye_controls` 时 rerun 按数据包围盒自动取景，而单目深度逐帧抖动，
+  画面就会一直“自动缩放”。这里把 `eye`/`look_at`/`eye_up` 钉死（`[pose3d]` 里可改），
+  打开就是一个固定视角；viewer 里鼠标拖仍可自由旋转。
+* **卡尔曼滤波**：每个人的每个关键点坐标（17×3 个标量）各配一个恒定速度滤波，跨帧用检测框
+  IoU 贪心配对跟踪，把深度噪声导致的“呼吸”抹平。`kalman_process` 越大越跟手，
+  `kalman_measurement` 越大越平滑；`--no-pose3d-kalman` 可关掉。
+* **深度图**先整倍数降采样再送（1440×1080 的 float32 每帧 6 MB，小窗用不着），
+  `DepthImage` 在 viewer 侧上色。
+
+小窗里画的是关节点 `Points3D` + 骨头 `LineStrips3D`（相机坐标系，`RIGHT_HAND_Y_DOWN`）。
+
+**它只是看着像 3D，不是测量**：深度是模型从单张图估的，绝对尺度会有出入（实测
+`bus.jpg` 里一个人的垂直跨度会比真身高大一截），而且相机没标定，只按一个假定的视场角
+近似。看骨架结构和姿态足够，别拿它量距离。
+
+深度模型选型（同一张 `bus.jpg`，以 `yolo26m-depth@768` 为参考；本机 RTX 4060 Laptop）：
+
+| 配置 | 延迟 | abs_rel vs m@768 ↓ | δ1 vs m@768 ↑ |
+|---|---|---|---|
+| n@320 | 4.5 ms | 0.129 | 0.751 |
+| **s@640（默认）** | 10.0 ms | 0.082 | 0.948 |
+| n@640 | 7.7 ms | 0.061 | 0.965 |
+| m@640 | 17.4 ms | 0.036 | 0.998 |
+
+主要收益来自 **imgsz**（权重在 768 训练/评测，320 没喂饱），不是换大模型。要换只改
+`[pose3d].weights` / `imgsz`。另外官方的绝对尺度是全局标定，可以用 `YOLO(...).calibrate()`
+拿本相机几个实测点重标（文档：5 点/图、100+ 图可到全量拟合的 1% 内）。
 
 * 弹窗模式下 viewer 是**独立进程**，会继承当前终端；在脚本/管道里跑就用 `--rerun-save`，
   别让 viewer 把 stdout 占住。
@@ -294,6 +406,11 @@ models/
   这个场景能达到的值。
 * 颜色不对（红蓝互换）—— 检查是否绕过了 `colors.bgr_to_rgb()`。快速自检：对着明显偏红的
   物体比较 `frame.bgr[..., 2].mean()`（R）与 `frame.bgr[..., 0].mean()`（B），R 应更大。
+* `设置特性 X=Y 失败` —— 报错已经把尽力查到的类型/可选符号列出来了；`0x80000004` 是
+  "节点在、符号名不对"。同义符号名（`Bits_8` 对 `ADCBitDepth_8`）会先自动改写，所以还
+  报这个错就说明数字对不上或有多个候选，照着报错里的符号名写全名即可。
+* `MV_CC_OpenDevice failed: 0x80000203` 反复出现、但没有任何进程在取流 —— 上一把程序
+  刚退出时相机的访问权还没放完，等一两秒重试就好；一直不行就拔插一次 USB。
 * 改了 `config.toml` 好像没生效 —— 先 `--show-config` 看合并后的值，再确认写到正确的段里
   （键名写错会有 warning）。
 * rerun 窗口没起来 —— 加 `--no-rerun` 先确认取流与检测本身正常。

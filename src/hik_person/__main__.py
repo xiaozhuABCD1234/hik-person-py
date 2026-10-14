@@ -17,6 +17,8 @@ import sys
 import time
 from dataclasses import fields
 
+import numpy as np
+
 from .colors import pixel_type_name
 from .config import (
     EXPOSURE_MODES,
@@ -75,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="NAME=VALUE",
         help="覆盖 [camera].feature（给了就整体替换，可重复）。"
-        "例：--feature ADCBitDepth=Bits_8 解锁 249 fps",
+        "例：--feature ADCBitDepth=Bits_8 解锁 249 fps（写别的机型的符号名会自动改写）",
     )
     p.add_argument("--weights", default=None, help="覆盖 [detector].weights")
     p.add_argument("--task", default=None, choices=TASKS, help="覆盖 [detector].task")
@@ -121,6 +123,40 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="覆盖 [rerun].jpeg_quality：1-100，0 = 送原图（更吃内存）",
+    )
+
+    pose3d_group = p.add_mutually_exclusive_group()
+    pose3d_group.add_argument(
+        "--pose3d",
+        dest="pose3d_enabled",
+        action="store_true",
+        default=None,
+        help="覆盖 [pose3d].enabled=true：rerun 右下角开 3D 骨架小窗",
+    )
+    pose3d_group.add_argument(
+        "--no-pose3d",
+        dest="pose3d_enabled",
+        action="store_false",
+        default=None,
+        help="覆盖 [pose3d].enabled=false：关掉 3D 小窗，不加载深度模型",
+    )
+    p.add_argument("--pose3d-weights", default=None, help="覆盖 [pose3d].weights")
+    p.add_argument("--pose3d-imgsz", type=int, default=None, help="覆盖 [pose3d].imgsz")
+    p.add_argument("--pose3d-hz", type=float, default=None, help="覆盖 [pose3d].hz")
+    p.add_argument("--pose3d-fov-deg", type=float, default=None, help="覆盖 [pose3d].fov_deg")
+    p.add_argument(
+        "--pose3d-depth-view",
+        dest="pose3d_depth_view",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="覆盖 [pose3d].depth_view：左列再放一块估计深度图",
+    )
+    p.add_argument(
+        "--pose3d-kalman",
+        dest="pose3d_kalman",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="覆盖 [pose3d].kalman：3D 关键点卡尔曼滤波（默认开）",
     )
     return p
 
@@ -231,6 +267,13 @@ def main(argv: list[str] | None = None) -> int:
             server_memory_limit=settings.rerun_server_memory_limit,
             jpeg_quality=settings.rerun_jpeg_quality,
             port=settings.rerun_port,
+            show_pose3d=settings.pose3d_enabled and settings.task == "pose",
+            show_depth=(
+                settings.pose3d_enabled and settings.pose3d_depth_view and settings.task == "pose"
+            ),
+            eye=settings.pose3d_eye,
+            look_at=settings.pose3d_look_at,
+            eye_up=settings.pose3d_eye_up,
         )
         if rrd:
             print(f"rerun 记录 -> {rrd}")
@@ -246,6 +289,34 @@ def main(argv: list[str] | None = None) -> int:
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
 
+    # 单目 3D 骨架（只在 pose + rerun 都在时才有意义）
+    depth_estimator = None
+    tracker = None
+    if view is not None and settings.pose3d_enabled and settings.task == "pose":
+        from .depth import DepthEstimator
+        from .pose import NUM_KEYPOINTS
+        from .pose3d import Intrinsics, lift_keypoints, to_display, valid_mask
+        from .track import Pose3DTracker
+
+        depth_path = resolve_path(settings.pose3d_weights)
+        if not depth_path.is_file():
+            print(
+                f"error: 找不到深度权重 {depth_path}（[pose3d].weights = "
+                f"{settings.pose3d_weights!r}）；不想用 3D 小窗就加 --no-pose3d",
+                file=sys.stderr,
+            )
+            return 2
+        depth_estimator = DepthEstimator(
+            depth_path,
+            device=settings.device or None,
+            imgsz=settings.pose3d_imgsz,
+        )
+        if settings.pose3d_kalman:
+            tracker = Pose3DTracker(
+                process_noise=settings.pose3d_kalman_process,
+                measurement_noise=settings.pose3d_kalman_measurement,
+            )
+
     print(f"config: {args.config}")
     print(
         f"run   : {settings.task}, detect {settings.detect_hz:g} Hz"
@@ -253,11 +324,28 @@ def main(argv: list[str] | None = None) -> int:
         f"conf {settings.conf:g}, 曝光 {settings.exposure_mode}, "
         f"feature {settings.feature or '[]'}"
     )
+    if depth_estimator is not None:
+        extras = []
+        if settings.pose3d_depth_view:
+            extras.append("深度图")
+        if settings.pose3d_kalman:
+            extras.append(
+                f"卡尔曼 q={settings.pose3d_kalman_process:g} "
+                f"r={settings.pose3d_kalman_measurement:g}"
+            )
+        print(
+            f"pose3d: {settings.pose3d_weights} imgsz {settings.pose3d_imgsz}, "
+            f"{settings.pose3d_hz:g} Hz, 视场角 {settings.pose3d_fov_deg:g}°"
+            + (f"，{'，'.join(extras)}" if extras else "")
+        )
 
     period = 1.0 / max(settings.detect_hz, 0.1)
     # 帧到达时刻正好压在周期边界上时纯靠抖动决定去留，会白丢约一半的帧
     # （实测 15/15 与 30/15 都会），所以留一点容差。倍数在 config.toml 里。
     min_gap = period * settings.rate_tolerance
+    # 深度模型的频率与 detect 分开：它比 pose 贵，没必要跟满
+    period_3d = 1.0 / settings.pose3d_hz if settings.pose3d_hz > 0 else 0.0
+    t_last_3d = 0.0
     processed = skipped = 0
     last_count = -1
     t_start = t_last = t_last_save = time.monotonic()
@@ -328,15 +416,18 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 t_last = now
 
-                instances, annotated = estimator(frame.bgr)
+                # 不在这里 result.plot()：rerun 侧用结构化框/骨架重画，只有存盘时才
+                # 需要标注图，到那时再 estimator.annotate(result) 按需生成。
+                instances, result = estimator(frame.bgr)
                 processed += 1
                 count = len(instances)
 
                 if view is not None:
+                    # 送相机原图；框/关键点/骨架由 rerun 用结构化数据画
                     if settings.task == "pose":
-                        view.log_frame(frame, annotated, poses=instances)
+                        view.log_frame(frame, frame.bgr, poses=instances)
                     else:
-                        view.log_frame(frame, annotated, detections=instances)
+                        view.log_frame(frame, frame.bgr, detections=instances)
                 if count and count != last_count:
                     print(
                         f"[{time.strftime('%H:%M:%S')}] person x{count} "
@@ -350,8 +441,43 @@ def main(argv: list[str] | None = None) -> int:
 
                     t_last_save = now
                     path = save_dir / time.strftime("person_%Y%m%d_%H%M%S.jpg")
-                    cv2.imwrite(str(path), annotated)
+                    cv2.imwrite(str(path), estimator.annotate(result))
                     print(f"saved {path}")
+
+                if depth_estimator is not None and now - t_last_3d >= period_3d:
+                    t_last_3d = now
+                    # 每一轮都算深度：深度图本身也要看，不只给骨架用
+                    depth = depth_estimator(frame.bgr)
+                    if settings.pose3d_depth_view:
+                        view.log_depth(depth)
+                    intrinsics = Intrinsics.from_fov(
+                        frame.width, frame.height, settings.pose3d_fov_deg
+                    )
+                    if instances:
+                        boxes = [pose.xyxy for pose in instances]
+                        confs = np.stack([pose.kpt_conf for pose in instances])
+                        lifted = np.stack(
+                            [
+                                lift_keypoints(pose.keypoints, depth, intrinsics)
+                                for pose in instances
+                            ]
+                        )
+                    else:
+                        boxes = []
+                        confs = np.zeros((0, NUM_KEYPOINTS), np.float32)
+                        lifted = np.zeros((0, NUM_KEYPOINTS, 3), np.float32)
+                    if tracker is not None:
+                        items = tracker.update(
+                            boxes, lifted, confs, threshold=settings.kpt_conf, t=now
+                        )
+                    else:
+                        items = [
+                            to_display(
+                                lifted[i], valid_mask(lifted[i], confs[i], settings.kpt_conf)
+                            )
+                            for i in range(len(boxes))
+                        ]
+                    view.log_poses3d(items)
 
                 if processed % 50 == 0:
                     print(

@@ -73,6 +73,28 @@ class Settings:
     rerun_jpeg_quality: int = 75
     rerun_port: int = 9876
 
+    # ---------------------------------------------------------------- [pose3d]
+    # 单目 3D：yolo26n-depth 给每个关键点补深度，rerun 右下角小窗画 3D 骨架。
+    pose3d_enabled: bool = True
+    pose3d_weights: str = "models/yolo26s-depth.pt"
+    pose3d_imgsz: int = 640
+    # 深度推理频率（Hz）。深度模型不便宜，没必要跟满 detect_hz。
+    pose3d_hz: float = 15.0
+    # 假定的水平视场角（度）。没标定，只能按普通镜头估，用来把像素+深度还原成 3D。
+    pose3d_fov_deg: float = 60.0
+    # 左列下面再放一块估计深度图（Turbo 伪彩）。
+    pose3d_depth_view: bool = True
+    # 固定 3D 视角（相机坐标系，米）：eye 位置 / 看向的点 / 上方向。
+    # 不固定的话 rerun 会按数据包围盒自动取景，深度噪声会让画面忽大忽小。
+    pose3d_eye: tuple[float, float, float] = (0.0, 0.0, -1.5)
+    pose3d_look_at: tuple[float, float, float] = (0.0, 0.0, 2.5)
+    pose3d_eye_up: tuple[float, float, float] = (0.0, -1.0, 0.0)
+    # 卡尔曼滤波：平滑单目深度逐帧的抖动（每个人的每个关键点一个恒定速度滤波）。
+    pose3d_kalman: bool = True
+    # 过程噪声（加速度，m/s²）越大越跟手、越不平滑；观测噪声（m）越大越平滑。
+    pose3d_kalman_process: float = 10.0
+    pose3d_kalman_measurement: float = 0.1
+
 
 # (section, key) -> Settings 字段名
 CONFIG_FIELDS: dict[tuple[str, str], str] = {
@@ -107,6 +129,18 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("rerun", "server_memory_limit"): "rerun_server_memory_limit",
     ("rerun", "jpeg_quality"): "rerun_jpeg_quality",
     ("rerun", "port"): "rerun_port",
+    ("pose3d", "enabled"): "pose3d_enabled",
+    ("pose3d", "weights"): "pose3d_weights",
+    ("pose3d", "imgsz"): "pose3d_imgsz",
+    ("pose3d", "hz"): "pose3d_hz",
+    ("pose3d", "fov_deg"): "pose3d_fov_deg",
+    ("pose3d", "depth_view"): "pose3d_depth_view",
+    ("pose3d", "eye"): "pose3d_eye",
+    ("pose3d", "look_at"): "pose3d_look_at",
+    ("pose3d", "eye_up"): "pose3d_eye_up",
+    ("pose3d", "kalman"): "pose3d_kalman",
+    ("pose3d", "kalman_process"): "pose3d_kalman_process",
+    ("pose3d", "kalman_measurement"): "pose3d_kalman_measurement",
 }
 
 # 命令行能覆盖的字段（argparse 里 default=None 表示"没给"）
@@ -135,6 +169,14 @@ def _coerce(value: Any, target: type, attr: str) -> Any:
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
             raise TypeError(f"需要字符串数组，收到 {value!r}")
         return list(value)
+    if target is tuple:
+        if (
+            not isinstance(value, list)
+            or len(value) != 3
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)
+        ):
+            raise TypeError(f"需要 3 个数字的数组，收到 {value!r}")
+        return tuple(float(v) for v in value)
     return str(value)
 
 

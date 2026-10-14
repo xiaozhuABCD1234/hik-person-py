@@ -108,7 +108,12 @@ def visible_keypoints(
 
 
 class PoseEstimator:
-    """ultralytics YOLO pose；输入 BGR，输出 (PoseInstance 列表, 画好的 BGR 图)。"""
+    """ultralytics YOLO pose；输入 BGR，输出 (PoseInstance 列表, ultralytics Results)。
+
+    不再无条件 ``result.plot()``（它会在整图上画框/骨架/关键点），rerun 侧用
+    ``Boxes2D``/``Points2D``/``LineStrips2D`` 结构化数据重画；只有要存盘时才调
+    ``annotate()`` 按需生成标注图。
+    """
 
     def __init__(
         self,
@@ -135,7 +140,7 @@ class PoseEstimator:
             )
         self.names = {int(k): str(v) for k, v in dict(self.model.names).items()}
 
-    def __call__(self, bgr: np.ndarray) -> tuple[list[PoseInstance], np.ndarray]:
+    def __call__(self, bgr: np.ndarray) -> tuple[list[PoseInstance], object]:
         result = self.model.predict(
             bgr,
             conf=self.conf,
@@ -168,5 +173,8 @@ class PoseEstimator:
                     )
                 )
 
-        # result.plot() 自带骨架与关键点，直接用
-        return instances, np.ascontiguousarray(result.plot())
+        return instances, result
+
+    def annotate(self, result) -> np.ndarray:
+        """把 Results 画成 BGR 标注图（框 + 关键点 + 骨架）。按需调用，别每帧调。"""
+        return np.ascontiguousarray(result.plot())
