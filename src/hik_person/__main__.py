@@ -16,11 +16,11 @@ import argparse
 import sys
 import time
 from dataclasses import fields
-
-import numpy as np
+from pathlib import Path
 
 from .colors import pixel_type_name
 from .config import (
+    ASSETS_URL,
     EXPOSURE_MODES,
     Settings,
     apply_cli,
@@ -36,6 +36,14 @@ from .mvs import (
     load_sdk,
     parse_feature_spec,
 )
+
+
+def weights_download_hint(value: str, fallback: str) -> str:
+    """找不到权重时的下两步：官方下载命令 + 仓库自带的回退档位。"""
+    return (
+        f"       从官方下载：curl -L --create-dirs -o {value} {ASSETS_URL}/{Path(value).name}\n"
+        f"       或用仓库自带的：{fallback}"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -127,6 +135,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="覆盖 [rerun].jpeg_quality：1-100，0 = 送原图（更吃内存）",
     )
+    p.add_argument(
+        "--show-values",
+        dest="rerun_show_values",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="覆盖 [rerun].show_values：右列要不要「每人一行」的数值行",
+    )
+    p.add_argument(
+        "--show-coords",
+        dest="rerun_show_coords",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="覆盖 [rerun].show_coords：右列要不要每人 x/y/z 坐标曲线",
+    )
+    p.add_argument(
+        "--show-count",
+        dest="rerun_show_count",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="覆盖 [rerun].show_count：右列要不要人数曲线（默认不上）",
+    )
 
     pose3d_group = p.add_mutually_exclusive_group()
     pose3d_group.add_argument(
@@ -160,6 +189,30 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="覆盖 [pose3d].kalman：3D 关键点卡尔曼滤波（默认开）",
+    )
+    p.add_argument(
+        "--track-iou-threshold",
+        type=float,
+        default=None,
+        help="覆盖 [track].iou_threshold：跨帧关联的 IoU 阀值（越高越容易换 id）",
+    )
+    p.add_argument(
+        "--track-match-max-distance",
+        type=float,
+        default=None,
+        help="覆盖 [track].match_max_distance：配对还要满足的 3D 距离（米，0 = 只看 IoU）",
+    )
+    p.add_argument(
+        "--track-max-missed",
+        type=int,
+        default=None,
+        help="覆盖 [track].max_missed：连续漏检多少帧后删轨迹",
+    )
+    p.add_argument(
+        "--track-trail-length",
+        type=int,
+        default=None,
+        help="覆盖 [track].trail_length：轨迹点数上限（0 = 不留轨迹）",
     )
     return p
 
@@ -219,7 +272,8 @@ def main(argv: list[str] | None = None) -> int:
     weights_path = resolve_path(weights_value)
     if not weights_path.is_file():
         print(
-            f"error: 找不到权重 {weights_path}（[detector].weights = {weights_value!r}）",
+            f"error: 找不到权重 {weights_path}（[detector].weights = {weights_value!r}）\n"
+            f"{weights_download_hint(weights_value, '--weights models/yolo26m-pose.pt')}",
             file=sys.stderr,
         )
         return 2
@@ -275,18 +329,37 @@ def main(argv: list[str] | None = None) -> int:
     # 单目 3D 骨架（只在 pose + rerun 都在时才有意义）
     depth_estimator = None
     tracker = None
+    if view is not None:
+        # 跟踪器一直在：开了 3D 就抬真 3D，没开就只做 2D 关联（id/轨迹）
+        from .track import PersonTracker
+
+        tracker = PersonTracker(
+            kalman=settings.pose3d_kalman,
+            process_noise=settings.pose3d_kalman_process,
+            measurement_noise=settings.pose3d_kalman_measurement,
+            iou_threshold=settings.track_iou_threshold,
+            match_max_distance=settings.track_match_max_distance,
+            max_missed=settings.track_max_missed,
+            max_missed_kpt=settings.track_max_missed_kpt,
+            trail_length=settings.track_trail_length,
+            trail_interval=settings.track_trail_interval,
+            speed_smoothing=settings.track_speed_smoothing,
+            speed_deadband=settings.track_speed_deadband,
+        )
+
     if view is not None and settings.pose3d_enabled:
         from .depth import DepthEstimator
-        from .geometry import Intrinsics, lift_keypoints
-        from .pose import NUM_KEYPOINTS
-        from .pose3d import depth_valid_mask, to_display
-        from .track import Pose3DTracker
+        from .geometry import Intrinsics
 
         depth_path = resolve_path(settings.pose3d_weights)
         if not depth_path.is_file():
+            hint = weights_download_hint(
+                settings.pose3d_weights, "--pose3d-weights models/yolo26m-depth.pt"
+            )
             print(
                 f"error: 找不到深度权重 {depth_path}（[pose3d].weights = "
-                f"{settings.pose3d_weights!r}）；不想用 3D 小窗就加 --no-pose3d",
+                f"{settings.pose3d_weights!r}）\n{hint}\n"
+                f"       不想用 3D 小窗就加 --no-pose3d",
                 file=sys.stderr,
             )
             return 2
@@ -295,11 +368,6 @@ def main(argv: list[str] | None = None) -> int:
             device=settings.device or None,
             imgsz=settings.pose3d_imgsz,
         )
-        if settings.pose3d_kalman:
-            tracker = Pose3DTracker(
-                process_noise=settings.pose3d_kalman_process,
-                measurement_noise=settings.pose3d_kalman_measurement,
-            )
 
     print(f"config: {args.config}")
     print(
@@ -317,10 +385,23 @@ def main(argv: list[str] | None = None) -> int:
                 f"卡尔曼 q={settings.pose3d_kalman_process:g} "
                 f"r={settings.pose3d_kalman_measurement:g}"
             )
+        extras.append(
+            f"跟踪 iou {settings.track_iou_threshold:g}"
+            + (
+                f" 距离门限 {settings.track_match_max_distance:g} m"
+                if settings.track_match_max_distance > 0
+                else ""
+            )
+        )
         print(
             f"pose3d: {settings.pose3d_weights} imgsz {settings.pose3d_imgsz}, "
             f"{settings.pose3d_hz:g} Hz, 视场角 {settings.pose3d_fov_deg:g}°"
             + (f"，{'，'.join(extras)}" if extras else "")
+        )
+    elif tracker is not None:
+        print(
+            f"track : 2D 关联（无深度）：iou {settings.track_iou_threshold:g}，"
+            f"轨迹 {settings.track_trail_length} 点 / {settings.track_trail_interval:g} s"
         )
 
     period = 1.0 / max(settings.detect_hz, 0.1)
@@ -404,15 +485,37 @@ def main(argv: list[str] | None = None) -> int:
                 # 需要标注图，到那时再 estimator.annotate(result) 按需生成。
                 instances, result = estimator(frame.bgr)
                 processed += 1
-                count = len(instances)
+
+                # 深度模型比 pose 贵，按 [pose3d].hz 单独限速；没到点的那几帧只做 2D
+                # 关联（id/轨迹照常，3D 部分走卡尔曼预测），不拿旧深度抬新帧的关键点。
+                depth = None
+                intrinsics = None
+                if depth_estimator is not None and now - t_last_3d >= period_3d:
+                    t_last_3d = now
+                    depth = depth_estimator(frame.bgr)
+                    intrinsics = Intrinsics.from_fov(
+                        frame.width, frame.height, settings.pose3d_fov_deg
+                    )
+
+                people = (
+                    tracker.update(instances, depth, intrinsics, threshold=settings.kpt_conf, t=now)
+                    if tracker is not None
+                    else []
+                )
+                live = [person for person in people if person.missed == 0]
+                count = len(live)
 
                 if view is not None:
                     # 送相机原图；框/关键点/骨架由 rerun 用结构化数据画
-                    view.log_frame(frame, frame.bgr, poses=instances)
+                    view.log_frame(frame, people)
+                    if depth is not None and settings.pose3d_depth_view:
+                        view.log_depth(depth)
+                    if settings.pose3d_enabled:
+                        view.log_people3d(people)
                 if count and count != last_count:
                     print(
                         f"[{time.strftime('%H:%M:%S')}] person x{count} "
-                        f"({', '.join(f'{d.conf:.2f}' for d in instances)})"
+                        f"({', '.join(person.label for person in live)})"
                     )
                 last_count = count
 
@@ -424,41 +527,6 @@ def main(argv: list[str] | None = None) -> int:
                     path = save_dir / time.strftime("person_%Y%m%d_%H%M%S.jpg")
                     cv2.imwrite(str(path), estimator.annotate(result))
                     print(f"saved {path}")
-
-                if depth_estimator is not None and now - t_last_3d >= period_3d:
-                    t_last_3d = now
-                    # 每一轮都算深度：深度图本身也要看，不只给骨架用
-                    depth = depth_estimator(frame.bgr)
-                    if settings.pose3d_depth_view:
-                        view.log_depth(depth)
-                    intrinsics = Intrinsics.from_fov(
-                        frame.width, frame.height, settings.pose3d_fov_deg
-                    )
-                    if instances:
-                        boxes = [pose.xyxy for pose in instances]
-                        confs = np.stack([pose.kpt_conf for pose in instances])
-                        lifted = np.stack(
-                            [
-                                lift_keypoints(pose.keypoints, depth, intrinsics)
-                                for pose in instances
-                            ]
-                        )
-                    else:
-                        boxes = []
-                        confs = np.zeros((0, NUM_KEYPOINTS), np.float32)
-                        lifted = np.zeros((0, NUM_KEYPOINTS, 3), np.float32)
-                    if tracker is not None:
-                        items = tracker.update(
-                            boxes, lifted, confs, threshold=settings.kpt_conf, t=now
-                        )
-                    else:
-                        items = [
-                            to_display(
-                                lifted[i], depth_valid_mask(lifted[i], confs[i], settings.kpt_conf)
-                            )
-                            for i in range(len(boxes))
-                        ]
-                    view.log_poses3d(items)
 
                 if processed % 50 == 0:
                     print(

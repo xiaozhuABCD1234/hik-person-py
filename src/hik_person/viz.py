@@ -1,18 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""rerun 可视化：关键点/骨架 + 人数。
+"""rerun 可视化：2D 原图/框/骨架、估计深度、相机系 3D 骨架/轨迹/位置、数值行。
 
 记录到这些实体：
 
-==================================  ========================================
-``camera/image``                    相机原图（框/骨架由 rerun 按下面的结构化实体画）
-``camera/image/boxes``              框的 Boxes2D（可悬停看标签与置信度）
-``camera/image/keypoints``          姿态关键点（带名称）
-``camera/image/skeleton``           骨架连线
-``person/count``                    人数（TimeSeriesView 里的曲线）
-``person/events``                   人数变化日志（带各框置信度）
-==================================  ========================================
+===================================  =======================================
+``camera/image``                     相机原图（框/骨架由下面的结构化实体画）
+``camera/image/boxes``               框的 Boxes2D（标签带 id 与置信度）
+``camera/image/keypoints``           2D 关键点（带名称与 id）
+``camera/image/skeleton``            2D 骨架连线
+``camera/depth``                     估计深度（DepthImage，悬停看米数）
+``camera/pose3d``                    相机系 3D 视图根（RIGHT_HAND_Y_DOWN）
+``camera/pose3d/{joints,skeleton}``  3D 骨架（单目深度）
+``camera/pose3d/trails``             每个人的运动轨迹
+``camera/pose3d/positions``          每个人的 3D 位置（标签 = id + 距离 + 速度）
+``person/values``                    极简数值行（每人一行短文本）
+``person/coords/<id>/{x,y,z}``       每个人的坐标曲线（相机系，米）
+``person/count``                     人数标量
+``person/events``                    人数变化日志
+===================================  =======================================
 
-布局由 blueprint 显式指定（左边标注图、右边人数曲线），不依赖 rerun 的自动推断。
+每个人的颜色由 id 决定（``color_for``），所以同一个 id 在 2D、3D 与坐标曲线里都是
+同一种颜色；曲线颜色是显式声明的，图例直接显示 ``#1`` 而不是一长串实体路径。
 
 进 rerun 前统一 `bgr_to_rgb()`：`rr.Image` 默认按 RGB 解读三通道数据，直接喂 BGR 会红蓝互换。
 """
@@ -26,9 +34,42 @@ import numpy as np
 from .colors import bgr_to_rgb
 from .pose import bones, visible_keypoints
 
-BOX_COLOR = (90, 220, 120)  # RGB
-KPT_COLOR = (255, 180, 60)
-SKELETON_COLOR = (120, 180, 255)
+# 按 id 轮转的颜色（RGB）。挑的是互相区分度高、在深色背景上也看得清的几种。
+PALETTE: tuple[tuple[int, int, int], ...] = (
+    (90, 220, 120),
+    (255, 180, 60),
+    (120, 180, 255),
+    (255, 120, 160),
+    (180, 140, 255),
+    (120, 230, 230),
+    (240, 220, 90),
+    (150, 255, 140),
+)
+POSITION_RADIUS = 0.04  # 米：3D 位置球半径
+JOINT_RADIUS = 0.02  # 米：关节球半径
+
+
+def color_for(person_id: int) -> tuple[int, int, int]:
+    """同一个 id 永远同一个颜色（id 从 1 开始，单调递增）。"""
+    return PALETTE[(int(person_id) - 1) % len(PALETTE)]
+
+
+def value_line(person) -> str:
+    """一个人一行短文本：只列本帧真有的项，不占地方也看不到 nan。
+
+    没有深度的那几帧（或单目深度全丢）就只有 id 与置信度，不会凭空写一个距离。
+    """
+    parts = [f"#{person.id}"]
+    if np.isfinite(person.distance):
+        parts.append(f"距 {person.distance:.2f} m")
+    if np.isfinite(person.speed_ground):
+        parts.append(f"速 {person.speed_ground:.2f} m/s")
+        parts.append(person.state)
+    if person.valid_count:
+        parts.append(f"关节 {person.valid_count}/{len(person.kpt_conf)}")
+    if len(parts) == 1:
+        parts.append(f"conf {person.conf:.2f}")
+    return " · ".join(parts)
 
 
 def _blueprint_module():
@@ -56,6 +97,9 @@ class RerunView:
         port: int = 9876,
         show_pose3d: bool = False,
         show_depth: bool = False,
+        show_values: bool = True,
+        show_coords: bool = True,
+        show_count: bool = False,
         eye: tuple[float, float, float] = (0.0, 0.0, -1.5),
         look_at: tuple[float, float, float] = (0.0, 0.0, 2.5),
         eye_up: tuple[float, float, float] = (0.0, -1.0, 0.0),
@@ -64,7 +108,7 @@ class RerunView:
 
         viewer 只当显示器：不给 save_path 就不往磁盘写任何东西。
         keep_history=False（默认）时图像/框/关键点用 static 记录，viewer 只保留最新一份，
-        没有时间轴可回拖，内存不随帧数涨；memory_limit 是兼底硬上限。
+        没有时间轴可回拖，内存不随帧数涨；memory_limit 是兜底硬上限。
         """
         import rerun as rr
 
@@ -74,12 +118,16 @@ class RerunView:
         self.jpeg_quality = int(jpeg_quality)
         self.show_pose3d = show_pose3d
         self.show_depth = show_depth
+        self.show_values = bool(show_values)
+        self.show_coords = bool(show_coords)
+        self.show_count = bool(show_count)
         self.eye = tuple(eye)
         self.look_at = tuple(look_at)
         self.eye_up = tuple(eye_up)
         self._last_count: int | None = None  # None = 还没记录过人数
         self._image_size: tuple[int, int] | None = None  # (宽, 高)，用于固定取景
         self._coords_logged = False  # 3D 视图的坐标系只发一次
+        self._styled_series: set[str] = set()  # 已经声明过颜色的曲线（只声明一次）
 
         rr.init(app_id, spawn=False)
         if save_path:
@@ -96,39 +144,46 @@ class RerunView:
     def _send_blueprint(self, width: int, height: int) -> None:
         """布局 + 把 2D 视图的取景钉死在图像范围内。
 
-        不设 visual_bounds 时，rerun 按“视图内数据的包围盒”自动取景：检测框/关键点
+        不设 visual_bounds 时，rerun 按"视图内数据的包围盒"自动取景：检测框/关键点
         一旦伸出画面（人半出画就是这样），取景就跟着放大缩小，看起来像画面在自动缩放。
         """
         rrb = _blueprint_module()
-        view_args: dict = {"origin": "camera/image", "name": "检测框"}
+        view_args: dict = {"origin": "camera/image", "name": "彩色 + 骨架"}
         # 老版本没有 VisualBounds2D：只能退回自动取景
         with contextlib.suppress(AttributeError, TypeError):
             view_args["visual_bounds"] = rrb.VisualBounds2D(x_range=[0, width], y_range=[0, height])
         try:
             left = rrb.Spatial2DView(**view_args)
             if self.show_depth:
-                # 左列：上面原图、下面深度图
+                # 左列：上面原图、下面估计深度图
                 left = rrb.Vertical(
                     left,
-                    rrb.Spatial2DView(origin="camera/depth", name="深度"),
+                    rrb.Spatial2DView(origin="camera/depth", name="估计深度"),
                     row_shares=[1, 1],
                 )
-            right = rrb.TimeSeriesView(origin="person/count", name="人数")
+
+            panels: list = []
+            shares: list[int] = []
+            if self.show_values:
+                panels.append(rrb.TextDocumentView(origin="person/values", name="数值"))
+                shares.append(1)
+            if self.show_coords:
+                panels.append(rrb.TimeSeriesView(origin="person/coords", name="坐标"))
+                shares.append(2)
+            if self.show_count:
+                panels.append(rrb.TimeSeriesView(origin="person/count", name="人数"))
+                shares.append(1)
             if self.show_pose3d:
-                # 右下角小面板：上面人数曲线、下面 3D 骨架
-                right = rrb.Vertical(
-                    right,
-                    self._make_3d_view(rrb),
-                    row_shares=[1, 1],
-                )
-            blueprint = rrb.Blueprint(
-                rrb.Horizontal(
-                    left,
-                    right,
-                    column_shares=[3, 1],
-                ),
-                rrb.TimePanel(state="collapsed"),
-            )
+                panels.append(self._make_3d_view(rrb))
+                shares.append(3)
+
+            right = None
+            if len(panels) == 1:
+                right = panels[0]
+            elif panels:
+                right = rrb.Vertical(*panels, row_shares=shares)
+            library = rrb.Horizontal(left, right, column_shares=[3, 1]) if right else left
+            blueprint = rrb.Blueprint(library, rrb.TimePanel(state="collapsed"))
         except AttributeError:
             # blueprint API 不可用就用 rerun 的默认布局，不影响记录本身
             return
@@ -138,7 +193,7 @@ class RerunView:
         """3D 骨架视图，相机钉在相机坐标系的默认位置。
 
         不设 ``eye_controls`` 时 rerun 会按数据的包围盒自动取景，而单目深度逐帧抖动，
-        骨架大小一直变，画面就跟着“自动缩放”。这里把眼位/视点/上方向固定下来，
+        骨架大小一直变，画面就跟着"自动缩放"。这里把眼位/视点/上方向固定下来，
         打开后就用一个固定视角看；想转视角在 viewer 里鼠标拖即可。
         """
         eye_cls = getattr(rrb, "EyeControls3D", None)
@@ -163,54 +218,38 @@ class RerunView:
         else:  # pragma: no cover - 老版本
             rr.set_time_sequence("frame", frame_number)
 
-    def log_frame(self, frame, image_bgr, *, poses=()) -> None:
-        """记一帧：原图 + 结构化框/骨架 + 人数。
-
-        ``image_bgr`` 必须是**相机原图**，不要传 ``result.plot()`` 画过的图：框、
-        关键点、骨架都由 rerun 用结构化数据在下面画，传标注图会让同一份信息画两遍。
-        """
-        rr = self.rr
-        number = frame.frame_number
-        if self.keep_history:
-            self._set_time(number)
-
-        # 分辨率变了（换相机/换模式）才重发 blueprint，把取景钉到新尺寸
-        height, width = image_bgr.shape[:2]
-        if (width, height) != self._image_size:
-            self._image_size = (width, height)
-            self._send_blueprint(width, height)
-
-        self._log("camera/image", self._encode(image_bgr))
-        instances = list(poses)
-        self._log_boxes(instances)
-        if poses:
-            self._log_poses(poses)
-
-        count = len(instances)
-        if count != self._last_count:
-            self._last_count = count
-            self._log(
-                "person/events",
-                rr.TextLog(
-                    f"{count} person(s): " + ", ".join(f"conf={d.conf:.2f}" for d in instances)
-                ),
-            )
-
-        # 人数只是几十字节的标量，一直带时间戳：右边那条曲线靠它画
-        self._set_time(number)
-        scalar = getattr(rr, "Scalars", None) or rr.Scalar
-        rr.log("person/count", scalar(count))
-
     def _log(self, entity: str, data) -> None:
         """默认 static：不带时间戳，viewer 只保留最新一份，没有历史可回拖。
 
         图像/框/关键点是内存大头（原图 4.67 MB/帧），它们不留历史后 viewer 的内存
-        就不随帧数涨；人数曲线需要时间戳，在 log_frame 里单独 set_time 后写。
+        就不随帧数涨；曲线需要时间戳，在 ``log_frame`` 里单独 set_time 后写。
         """
         if self.keep_history:
             self.rr.log(entity, data)
         else:
             self.rr.log(entity, data, static=True)
+
+    def _log_scalar(self, entity: str, value: float, *, person_id: int | None = None) -> None:
+        """标量曲线：**带时间戳**（跟 ``_log`` 的 static 相反），否则画不成曲线。
+
+        样式（颜色 + 图例名）只在第一次记：不写的话 rerun 会按路径哈希分配颜色，
+        同一个人在不同曲线里可能是不同颜色，图例还会显示完整实体路径。
+        """
+        rr = self.rr
+        scalar = getattr(rr, "Scalars", None) or rr.Scalar
+        rr.log(entity, scalar(float(value)))
+        if entity in self._styled_series:
+            return
+        self._styled_series.add(entity)
+        lines = getattr(rr, "SeriesLines", None)
+        if lines is None or person_id is None:  # pragma: no cover - 老版本没有 SeriesLines
+            return
+        with contextlib.suppress(Exception):
+            rr.log(
+                entity,
+                lines(colors=[color_for(person_id)], names=[f"#{person_id}"]),
+                static=True,
+            )
 
     def _encode(self, bgr: np.ndarray):
         """按 jpeg_quality 压过再送。
@@ -225,15 +264,62 @@ class RerunView:
             return image.compress(jpeg_quality=self.jpeg_quality)
         return image
 
-    def _log_boxes(self, instances) -> None:
+    # ---------------------------------------------------------------- 2D
+    def log_frame(self, frame, people) -> None:
+        """记一帧的 2D 内容：原图 + 结构化框/关键点/骨架 + 数值行。
+
+        ``frame.bgr`` 必须是**相机原图**，不要传 ``result.plot()`` 画过的图：框、
+        关键点、骨架都由 rerun 用结构化数据在这里画，传标注图会让同一份信息画两遍。
+        所有叠加信息都从 ``people``（带 id 的跟踪结果）来，所以 2D 上也看得到 id。
+        """
+        rr = self.rr
+        number = frame.frame_number
+        if self.keep_history:
+            self._set_time(number)
+
+        # 分辨率变了（换相机/换模式）才重发 blueprint，把取景钉到新尺寸
+        height, width = frame.bgr.shape[:2]
+        if (width, height) != self._image_size:
+            self._image_size = (width, height)
+            self._send_blueprint(width, height)
+
+        self._log("camera/image", self._encode(frame.bgr))
+        self._log_boxes(people)
+        self._log_poses2d(people)
+
+        live = [person for person in people if person.missed == 0]
+        count = len(live)
+        if count != self._last_count:
+            self._last_count = count
+            self._log(
+                "person/events",
+                rr.TextLog(
+                    f"{count} person(s): " + ", ".join(f"#{d.id} conf={d.conf:.2f}" for d in live)
+                ),
+            )
+
+        # 曲线一直带时间戳（rerun 靠它画曲线）：人数、每个人的位置坐标
+        self._set_time(number)
+        self._log_scalar("person/count", count)
+        if self.show_coords:
+            for person in live:
+                if np.isfinite(person.position).all():
+                    for axis, value in zip("xyz", person.position, strict=True):
+                        self._log_scalar(
+                            f"person/coords/{person.id}/{axis}", float(value), person_id=person.id
+                        )
+        if self.show_values:
+            self._log_values(live)
+
+    def _log_boxes(self, people) -> None:
         rr = self.rr
         cls = getattr(rr, "Boxes2D", None) or rr.Box2D  # 0.14 叫 Box2D
         # 图像在 camera/image，框挂到它的子路径上就会叠加显示
-        if not instances:
+        if not people:
             empty = np.zeros((0, 2), dtype=np.float32)
             self._log("camera/image/boxes", cls(centers=empty, sizes=empty))
             return
-        xyxy = np.array([d.xyxy for d in instances], dtype=np.float32)
+        xyxy = np.array([d.box for d in people], dtype=np.float32)
         centers = np.stack(
             [(xyxy[:, 0] + xyxy[:, 2]) * 0.5, (xyxy[:, 1] + xyxy[:, 3]) * 0.5], axis=1
         )
@@ -243,58 +329,81 @@ class RerunView:
             cls(
                 centers=centers,
                 sizes=sizes,
-                labels=[f"{getattr(d, 'label', 'person')} {d.conf:.2f}" for d in instances],
-                colors=[BOX_COLOR] * len(instances),
+                labels=[person.label for person in people],
+                colors=[color_for(person.id) for person in people],
             ),
         )
 
-    def _log_poses(self, poses) -> None:
-        """关键点用 Points2D（带名字），骨头用 LineStrips2D。"""
+    def _log_poses2d(self, people) -> None:
+        """2D 关键点用 Points2D（带名字），骨头用 LineStrips2D；颜色跟着 id。"""
         rr = self.rr
         points: list[np.ndarray] = []
         labels: list[str] = []
+        colors: list[tuple[int, int, int]] = []
         strips: list[np.ndarray] = []
-        for pose in poses:
+        strip_colors: list[tuple[int, int, int]] = []
+        for person in people:
+            color = color_for(person.id)
             visible, names = visible_keypoints(
-                pose.keypoints, pose.kpt_conf, threshold=self.kpt_conf
+                person.keypoints2d, person.kpt_conf, threshold=self.kpt_conf
             )
             if len(visible):
                 points.append(visible)
-                labels.extend(names)
-            strips.extend(bones(pose.keypoints, pose.kpt_conf, threshold=self.kpt_conf))
+                labels.extend(f"#{person.id} {name}" for name in names)
+                colors.extend([color] * len(visible))
+            for strip in bones(person.keypoints2d, person.kpt_conf, threshold=self.kpt_conf):
+                strips.append(strip)
+                strip_colors.append(color)
 
         self._log(
             "camera/image/keypoints",
             rr.Points2D(
                 np.concatenate(points) if points else np.zeros((0, 2), dtype=np.float32),
                 labels=labels,
-                colors=KPT_COLOR,
+                colors=colors or None,
                 radii=3.0,
             ),
         )
-        self._log("camera/image/skeleton", rr.LineStrips2D(strips, colors=SKELETON_COLOR))
+        self._log("camera/image/skeleton", rr.LineStrips2D(strips, colors=strip_colors))
 
+    def _log_values(self, live) -> None:
+        """极简数值行：每人一行短文本（距/速/状态/有效关节）。
+
+        刻意不用表格：一是表格在窄窗口里要横向拖，二是"大段文字"把图像挤没了。
+        每行只列本帧真有的项，所以看不到 nan。
+        """
+        rr = self.rr
+        document = getattr(rr, "TextDocument", None)
+        if document is None:  # pragma: no cover - 老版本没有 TextDocument
+            return
+        lines = [f"- {value_line(person)}" for person in live] or ["- 无人"]
+        media_type = getattr(rr, "MediaType", None)
+        kwargs = {"media_type": media_type.MARKDOWN} if media_type is not None else {}
+        self._log("person/values", document("\n".join(lines), **kwargs))
+
+    # ---------------------------------------------------------------- 深度
     def log_depth(self, depth: np.ndarray, *, max_width: int = 480) -> None:
         """把估计深度图送进 viewer（Turbo 伪彩）。
 
         深度是 float32（1440×1080 每帧 6 MB），送之前先整倍数降采样，别为一个小窗
-        白白撑带宽。``rr.DepthImage`` 在 viewer 侧上色，悬停能看到米数。
+        白白撑带宽。nan（无有效深度）先换成 0，否则 rerun 侧上色时会出现一片
+        "贴到镜头前"的假点。``rr.DepthImage`` 在 viewer 侧上色，悬停能看到米数。
         """
         rr = self.rr
         step = max(1, -(-depth.shape[1] // max_width))  # 向上取整的整除
-        downsampled = np.ascontiguousarray(depth[::step, ::step])
+        downsampled = np.nan_to_num(depth[::step, ::step], nan=0.0)
+        downsampled = np.ascontiguousarray(downsampled, dtype=np.float32)
         kwargs: dict = {"meter": 1.0}
         colormap = getattr(getattr(rr, "components", None), "Colormap", None)
         if colormap is not None:
             kwargs["colormap"] = colormap.Turbo
         self._log("camera/depth", rr.DepthImage(downsampled, **kwargs))
 
-    def log_poses3d(self, poses3d) -> None:
-        """记 3D 骨架（rerun 右下角小窗）。
+    # ---------------------------------------------------------------- 3D
+    def log_people3d(self, people) -> None:
+        """记 3D：骨架 + 轨迹 + 位置（相机坐标系，米）。
 
-        ``poses3d`` 是 ``(joints (M,3), names, strips)`` 的列表（见
-        ``pose3d.to_display`` / ``track.Pose3DTracker``）；传空列表就把小窗清空。
-        与 2D 一样走 static：viewer 只留最新一份。
+        与 2D 一样走 static：viewer 只留最新一份，``people`` 为空就把 3D 视图清空。
         """
         rr = self.rr
         if not self._coords_logged:
@@ -302,22 +411,55 @@ class RerunView:
             self._log("camera/pose3d", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN)
             self._coords_logged = True
 
-        points: list[np.ndarray] = []
+        joints: list[np.ndarray] = []
         labels: list[str] = []
+        colors: list[tuple[int, int, int]] = []
         strips: list[np.ndarray] = []
-        for joints, names, person_strips in poses3d:
-            if len(joints):
-                points.append(np.asarray(joints, dtype=np.float32))
-                labels.extend(names)
-            strips.extend(person_strips)
+        strip_colors: list[tuple[int, int, int]] = []
+        trails: list[np.ndarray] = []
+        trail_colors: list[tuple[int, int, int]] = []
+        positions: list[np.ndarray] = []
+        position_labels: list[str] = []
+        position_colors: list[tuple[int, int, int]] = []
+
+        for person in people:
+            color = color_for(person.id)
+            if len(person.joints):
+                joints.append(np.asarray(person.joints, dtype=np.float32))
+                labels.extend(f"#{person.id} {name}" for name in person.names)
+                colors.extend([color] * len(person.joints))
+            for strip in person.strips:
+                strips.append(np.asarray(strip, dtype=np.float32))
+                strip_colors.append(color)
+            if len(person.trail) > 1:
+                trails.append(np.asarray(person.trail, dtype=np.float32))
+                trail_colors.append(color)
+            if np.isfinite(person.position).all():
+                positions.append(np.asarray(person.position, dtype=np.float32))
+                position_labels.append(
+                    f"#{person.id} {person.distance:.2f} m · {person.speed_ground:.2f} m/s"
+                    if np.isfinite(person.speed_ground)
+                    else f"#{person.id} {person.distance:.2f} m"
+                )
+                position_colors.append(color)
 
         self._log(
             "camera/pose3d/joints",
             rr.Points3D(
-                np.concatenate(points) if points else np.zeros((0, 3), dtype=np.float32),
+                np.concatenate(joints) if joints else np.zeros((0, 3), dtype=np.float32),
                 labels=labels,
-                colors=KPT_COLOR,
-                radii=0.02,  # 米：关节小球半径 2 cm
+                colors=colors or None,
+                radii=JOINT_RADIUS,
             ),
         )
-        self._log("camera/pose3d/skeleton", rr.LineStrips3D(strips, colors=SKELETON_COLOR))
+        self._log("camera/pose3d/skeleton", rr.LineStrips3D(strips, colors=strip_colors))
+        self._log("camera/pose3d/trails", rr.LineStrips3D(trails, colors=trail_colors))
+        self._log(
+            "camera/pose3d/positions",
+            rr.Points3D(
+                np.stack(positions) if positions else np.zeros((0, 3), dtype=np.float32),
+                labels=position_labels,
+                colors=position_colors or None,
+                radii=POSITION_RADIUS,
+            ),
+        )

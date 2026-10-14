@@ -17,6 +17,8 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # src/hik_person/config.py -> 项目根
 DEFAULT_CONFIG_NAME = "config.toml"
+# 官方权重的下载地址：x 档体积大（240 MB），不入库，用 README 里的命令下到 models/
+ASSETS_URL = "https://github.com/ultralytics/assets/releases/download/v8.4.0"
 # 曝光/增益模式：sdk = 相机自动；manual = 固定值
 EXPOSURE_MODES: tuple[str, ...] = ("sdk", "manual")
 
@@ -52,8 +54,9 @@ class Settings:
     feature: list[str] = field(default_factory=list)
 
     # -------------------------------------------------------------- [detector]
-    # 姿态权重：m 档在 8G 显存 + 15 Hz 下实测 16.6 ms/帧（n 档 7.4 ms），精度更好。
-    weights: str = "models/yolo26m-pose.pt"
+    # 姿态权重：x 档精度最高，但在 8G 显存 + 15 Hz 下实测 36.3 ms/帧（m 档 16.6 ms）。
+    # x 档不在仓库里（体积大），按 README「模型」一节的命令下载到 models/。
+    weights: str = "models/yolo26x-pose.pt"
     conf: float = 0.35
     imgsz: int = 640
     device: str = ""
@@ -81,11 +84,15 @@ class Settings:
     # 图像送进 viewer 前先压成 JPEG；0 = 原图（4.67 MB/帧，viewer 内存约差 10 倍）
     rerun_jpeg_quality: int = 75
     rerun_port: int = 9876
+    # 右列放什么：数值行（每人一行）/ 坐标曲线 / 人数曲线。默认前两个，人数默认不上。
+    rerun_show_values: bool = True
+    rerun_show_coords: bool = True
+    rerun_show_count: bool = False
 
     # ---------------------------------------------------------------- [pose3d]
-    # 单目 3D：yolo26m-depth 给每个关键点补深度，rerun 右下角小窗画 3D 骨架。
+    # 单目 3D：yolo26x-depth 给每个关键点补深度，rerun 右下角小窗画 3D 骨架。
     pose3d_enabled: bool = True
-    pose3d_weights: str = "models/yolo26m-depth.pt"
+    pose3d_weights: str = "models/yolo26x-depth.pt"
     pose3d_imgsz: int = 640
     # 深度推理频率（Hz）。深度模型不便宜，没必要跟满 detect_hz。
     pose3d_hz: float = 15.0
@@ -102,7 +109,24 @@ class Settings:
     pose3d_kalman: bool = True
     # 过程噪声（加速度，m/s²）越大越跟手、越不平滑；观测噪声（m）越大越平滑。
     pose3d_kalman_process: float = 10.0
+    # 单目估计深度的抖动比真深度大得多，观测噪声不能设得很小（d435i 那边是 0.02）。
     pose3d_kalman_measurement: float = 0.1
+
+    # ----------------------------------------------------------------- [track]
+    # 跨帧关联（前后帧 IoU 贪心配对）与轨迹。id 单调递增、永不复用。
+    track_iou_threshold: float = 0.3
+    # >0 时配对还要满足 3D 距离（米）不超过它，两人交叉时不容易换 id；0 = 只看 IoU。
+    track_match_max_distance: float = 0.0
+    # 连续漏检多少帧后删轨迹（期间位置由卡尔曼预测，短遮挡不会丢 id）。
+    track_max_missed: int = 5
+    # 单个关键点连续丢这么多帧后不再画（人的其他部位继续画）。
+    track_max_missed_kpt: int = 3
+    # 轨迹点数上限与采样间隔（0 = 不留轨迹）。
+    track_trail_length: int = 300
+    track_trail_interval: float = 0.1
+    # 速度指数平滑时间常数（秒），0 = 不平滑；死区只影响显示状态（静止/行走）。
+    track_speed_smoothing: float = 0.3
+    track_speed_deadband: float = 0.15
 
 
 # (section, key) -> Settings 字段名
@@ -137,6 +161,9 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("rerun", "server_memory_limit"): "rerun_server_memory_limit",
     ("rerun", "jpeg_quality"): "rerun_jpeg_quality",
     ("rerun", "port"): "rerun_port",
+    ("rerun", "show_values"): "rerun_show_values",
+    ("rerun", "show_coords"): "rerun_show_coords",
+    ("rerun", "show_count"): "rerun_show_count",
     ("pose3d", "enabled"): "pose3d_enabled",
     ("pose3d", "weights"): "pose3d_weights",
     ("pose3d", "imgsz"): "pose3d_imgsz",
@@ -149,6 +176,14 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("pose3d", "kalman"): "pose3d_kalman",
     ("pose3d", "kalman_process"): "pose3d_kalman_process",
     ("pose3d", "kalman_measurement"): "pose3d_kalman_measurement",
+    ("track", "iou_threshold"): "track_iou_threshold",
+    ("track", "match_max_distance"): "track_match_max_distance",
+    ("track", "max_missed"): "track_max_missed",
+    ("track", "max_missed_kpt"): "track_max_missed_kpt",
+    ("track", "trail_length"): "track_trail_length",
+    ("track", "trail_interval"): "track_trail_interval",
+    ("track", "speed_smoothing"): "track_speed_smoothing",
+    ("track", "speed_deadband"): "track_speed_deadband",
 }
 
 # 命令行能覆盖的字段（argparse 里 default=None 表示"没给"）
