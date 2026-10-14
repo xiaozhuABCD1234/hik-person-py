@@ -23,6 +23,10 @@ rerun /tmp/hik.rrd                                    # 事后回放
 注意：弹窗模式（默认）下 rerun viewer 是另一个进程，会继承当前终端；
 在脚本/管道里跑就用 `--rerun-save` 落盘，别让 viewer 把 stdout 占住。
 
+`--rerun-save` 每帧会写两张 1440×1080 的图，实测约 **8.5 MB/帧**（50 帧 ≈ 424 MB），
+15 Hz 就是 128 MB/s。长跑别这么干：用 `--no-rerun --save-dir` 只留检测到人的帧，
+或者只跑短时录制。弹窗模式受 viewer 的 `--memory-limit` 约束，不会无限涨。
+
 ## 运行参数
 
 | 参数 | 默认 | 说明 |
