@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Iterable, Sequence
-from ctypes import POINTER, byref, c_ubyte, cast, memset, sizeof
+from ctypes import POINTER, byref, c_bool, c_ubyte, cast, memset, sizeof
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -166,6 +166,15 @@ def list_devices(sdk) -> list[Device]:
     return devices
 
 
+# GenICam 特性类型 -> 报错时给用户看的说法（SDK 没有“查类型”的接口，见 Camera._node_kind）
+_NODE_KIND_LABELS = {
+    "bool": "布尔（Bool）",
+    "int": "整型（Int）",
+    "float": "浮点（Float）",
+    "enum": "枚举（Enum）",
+}
+
+
 def parse_feature_spec(spec: str) -> tuple[str, str]:
     """把 ``--feature NAME=VALUE`` 解析成 ``(NAME, VALUE)``。"""
     name, sep, value = spec.partition("=")
@@ -198,6 +207,68 @@ def feature_setter_order(value: str) -> tuple[str, ...]:
     return ("float", "enum_int")
 
 
+def _norm_symbol(text: str) -> str:
+    """符号名归一化：只留小写字母数字（``Bits_8``/``bits8`` 视为同一个）。"""
+    return "".join(ch for ch in text.lower() if ch.isalnum())
+
+
+def symbolic_candidates(name: str, value: str, entries: Sequence[str]) -> list[str]:
+    """从枚举符号表里猜用户想写的是哪一个（纯函数，便于单测）。
+
+    同一个概念在不同机型上符号名不同（``Bits_8`` 对 ``ADCBitDepth_8``，数值都是 0），
+    所以先把符号名和值都归一化，再用两个判据：① 两串完全一样；② 把两边的节点名都去掉
+    后，残部有一头是另一头的后缀（两个方向都拍，所以哪边的配置抄错了都能认出来）。
+
+    只是**提示**（报错里列出最像的），敢不敢真拿它去写由 ``alias_symbolic`` 再筛一道。
+    """
+    want = _norm_symbol(value)
+    if not want:
+        return []
+    for entry in entries:
+        if _norm_symbol(entry) == want:
+            return [entry]
+    value_body = _norm_symbol(value.replace(name, ""))
+    if not value_body:
+        return []
+    return [
+        entry
+        for entry in entries
+        if (body := _norm_symbol(entry.replace(name, "")))
+        and (value_body.endswith(body) or body.endswith(value_body))
+    ]
+
+
+def _trailing_digits(text: str) -> str:
+    """``bits8`` -> ``8``；没有尾部数字就是空串。"""
+    return text[len(text.rstrip("0123456789")) :]
+
+
+def alias_symbolic(name: str, value: str, entries: Sequence[str]) -> str | None:
+    """这台相机上“同一个设置的另一个名字”是哪个；不敢确定就返回 None。
+
+    同一个特性在不同机型上符号名不同（同一台 MV-CB016-10UC-S 叫 ``Bits_8``，
+    MV-CS016-10UC 叫 ``ADCBitDepth_8``，数值都是 0），写错名字不该逼人改 config，
+    所以能确定就自动换成这台相机认的那个名字。
+
+    自动改写只认两种把握得住的情况，**都要求名字里的数字不变** —— 8 bit 与 12 bit
+    不能搞混，所以不做“最接近”的猜：
+
+    ① 去掉节点名后两边完全一样（``Foo`` 对 ``ADCBitDepth_Foo``）；
+    ② 残部有一头是另一头的后缀，且尾部数字一样（``Bits_8`` 对 ``ADCBitDepth_8``）。
+
+    命中多个候选（``Foo_8``/``Bar_8`` 都对得上）也不猜。纯函数，便于单测。
+    """
+    candidates = symbolic_candidates(name, value, entries)
+    if len(candidates) != 1:
+        return None
+    body = _norm_symbol(candidates[0].replace(name, ""))
+    value_body = _norm_symbol(value.replace(name, ""))
+    digits = _trailing_digits(body)
+    if body == value_body or (digits and digits == _trailing_digits(value_body)):
+        return candidates[0]
+    return None
+
+
 def _feature_setters() -> dict:
     """kind -> (调用的 SDK 方法, 把字符串值转成参数)。"""
     return {
@@ -209,6 +280,32 @@ def _feature_setters() -> dict:
         "enum": lambda cam, name, value: cam.MV_CC_SetEnumValueByString(name, value),
         "enum_int": lambda cam, name, value: cam.MV_CC_SetEnumValue(name, int(value)),
     }
+
+
+@dataclass(frozen=True)
+class FeatureWrite:
+    """一次 GenICam 特性写入的结果。
+
+    ``value`` 是**实际写进去**的值：符号名用了别的机型的叫法时，会被自动改写成这台
+    相机认的那个名字（``requested`` 保留用户写的原样，两个不一样就说明改写过了）。
+    """
+
+    kind: str
+    value: str
+    requested: str = ""
+
+    @property
+    def aliased(self) -> bool:
+        return self.value != self.requested
+
+    def summary(self) -> str:
+        """给日志用的一行。"""
+        if self.aliased:
+            return (
+                f"{self.value} (以 {self.kind} 写入；这台相机不叫 {self.requested}，"
+                f"已自动换成同一个设置的另一个名字)"
+            )
+        return f"{self.value} (以 {self.kind} 写入)"
 
 
 class Camera:
@@ -355,7 +452,7 @@ class Camera:
         )
         soft(cam.MV_CC_SetImageNodeNum(buffer_count), "SetImageNodeNum")
 
-        # 通用特性改写（例如 --feature ADCBitDepth=Bits_8）
+        # 通用特性改写（例如 --feature ADCBitDepth=ADCBitDepth_8；符号名随机型）
         self.applied_features = self.apply_features(feature_overrides)
 
         # AE 参数：类型按值的形态自动选（Brightness/曝光上限是 Int，增益上限是 Float）
@@ -366,8 +463,8 @@ class Camera:
                 ("AutoGainUpperLimit", auto_gain_upper_db),
             ):
                 if value is not None:
-                    kind = self.set_feature(name, f"{value:g}")
-                    self.notes.append(f"{name} = {value:g}（{kind}）")
+                    written = self.set_feature(name, f"{value:g}")
+                    self.notes.append(f"{name} = {value:g}（{written.kind}）")
 
         # 曝光/增益：<=0 与 <0 分别表示“保持设备值”。增益的 0 dB 是合法值（最小值），
         # 所以它不能用 0 当哨兵值。自动开着时这两个值由相机决定，不能再写。
@@ -409,30 +506,105 @@ class Camera:
         return float(st.fCurValue)
 
     # --------------------------------------------------------- 通用特性改写
-    def set_feature(self, name: str, value: str) -> str:
-        """按名字写一个 GenICam 特性；返回实际生效的写入方式。
+    def set_feature(self, name: str, value: str) -> FeatureWrite:
+        """按名字写一个 GenICam 特性；返回实际写入的方式与实际写入的值。
 
-        全失败时把每种尝试的错误码一起报出来，而不是只说“失败”。
+        失败时会先试着“改名”再报错：同一个特性在不同机型上符号名不同（同一台
+        MV-CB016-10UC-S 叫 ``Bits_8``，MV-CS016-10UC 叫 ``ADCBitDepth_8``），能确定
+        是同一个设置就自动换成这台相机认的名字，省掉"换个相机就得改 config"这件事。
+        改写要求名字里的数字一致（见 ``alias_symbolic``），8 bit 不会被悄悄改成 12 bit。
+
+        还是不成功就把每种尝试的错误码一起报出来，并探清楚这个特性是什么类型
+        （实测两种错要分开看）：
+
+        ==========  ==========================================================
+        0x80000109  MV_E_GC_NODE_NOT_FOUND：没有这个名字的节点，或节点不是这个类型
+        0x80000004  MV_E_PARAMETER：节点在，但给的符号名不在它的枚举列表里
+        ==========  ==========================================================
         """
         attempts = []
         setters = _feature_setters()
-        for kind in feature_setter_order(value):
-            ret = setters[kind](self.cam, name, value)
+        for setter_kind in feature_setter_order(value):
+            ret = setters[setter_kind](self.cam, name, value)
             if ret == 0:
-                return kind
-            attempts.append(f"{kind}=0x{ret & 0xFFFFFFFF:08x}")
+                return FeatureWrite(setter_kind, value, value)
+            attempts.append(f"{setter_kind}=0x{ret & 0xFFFFFFFF:08x}")
+
+        node_kind = self._node_kind(name)
+        entries = self._enum_entries(name) if node_kind == "enum" else []
+        if node_kind == "enum":
+            alias = alias_symbolic(name, value, entries)
+            if alias and setters["enum"](self.cam, name, alias) == 0:
+                return FeatureWrite("enum", alias, value)
+
         raise MvsError(
             f"设置特性 {name}={value} 失败（按 {', '.join(attempts)} 依次试过）："
-            f"检查特性名拼写，或该特性是否需要先满足别的条件（如先关自动模式）"
+            f"{self._feature_diagnosis(name, value, node_kind, entries)}"
         )
+
+    def _node_kind(self, name: str) -> str | None:
+        """探一个 GenICam 特性的类型；没有这个节点返回 None。
+
+        SDK 没有“查类型”的接口，只能拿四种 getter 逐个试：实测节点存在时只有对应
+        类型的那一个返回 0（别的都是 0x80000109）。
+        """
+        sdk = self.sdk
+        if self.cam.MV_CC_GetEnumValue(name, sdk.MVCC_ENUMVALUE()) == 0:
+            return "enum"
+        if self.cam.MV_CC_GetIntValue(name, sdk.MVCC_INTVALUE()) == 0:
+            return "int"
+        if self.cam.MV_CC_GetFloatValue(name, sdk.MVCC_FLOATVALUE()) == 0:
+            return "float"
+        if self.cam.MV_CC_GetBoolValue(name, c_bool()) == 0:
+            return "bool"
+        return None
+
+    def _enum_entries(self, name: str) -> list[str]:
+        """枚举特性支持的符号名（SDK 只给数值，得逐个查回符号）。"""
+        sdk = self.sdk
+        st = sdk.MVCC_ENUMVALUE()
+        if self.cam.MV_CC_GetEnumValue(name, st) != 0:
+            return []
+        entries = []
+        for i in range(st.nSupportedNum):
+            entry = sdk.MVCC_ENUMENTRY()
+            entry.nValue = st.nSupportValue[i]
+            if self.cam.MV_CC_GetEnumEntrySymbolic(name, entry) == 0:
+                entries.append(_decode(entry.chSymbolic))
+        return entries
+
+    def _feature_diagnosis(
+        self, name: str, value: str, kind: str | None, entries: list[str]
+    ) -> str:
+        """给 set_feature 的失败补一句人话：这特性是什么类型、能写什么值。
+
+        ``kind``/``entries`` 由 set_feature 探好传进来（它自己也要用，不重复查）。
+        """
+        if kind is None:
+            return (
+                f"这台相机上没有读到 {name} 这个特性：检查拼写，或它需要先满足别的条件"
+                f"（比如先关掉自动模式 / 停止取流）；也可以 dump 一份特性表看有什么"
+            )
+        if kind != "enum":
+            return (
+                f"{name} 是{_NODE_KIND_LABELS[kind]}特性，不能按枚举符号写 {value!r}"
+                f"（枚举/整型/浮点/布尔要分别用各自的写法，类型写错也是这个错）"
+            )
+        if not entries:
+            return f"{name} 是枚举特性，但读不到它的符号表"
+        known = f"{name} 是枚举特性，这台相机只认这些符号：{' / '.join(entries)}"
+        guesses = symbolic_candidates(name, value, entries)
+        if guesses:
+            return f"{known}；想写的可能是 {' 或 '.join(guesses)}（不能确定，没有自动改写）"
+        return f"{known}（符号名随机型不同，别照抄别的相机的配置）"
 
     def apply_features(self, specs: Iterable[str]) -> list[str]:
         """批量应用 ``NAME=VALUE``；返回可打印的摘要。"""
         applied = []
         for spec in specs:
             name, value = parse_feature_spec(spec)
-            kind = self.set_feature(name, value)
-            applied.append(f"{name}={value} (以 {kind} 写入)")
+            written = self.set_feature(name, value)
+            applied.append(f"{name}={written.summary()}")
         return applied
 
     def settings(self) -> dict:
