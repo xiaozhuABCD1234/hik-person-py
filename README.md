@@ -162,7 +162,7 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 
 | 实体 | 内容 |
 |---|---|
-| `camera/annotated` | 标注图：检测框 + 左上角人数横幅 |
+| `camera/annotated` | 标注图：模型画的框（pose 时含骨架），不在像素上额外烧字 |
 | `camera/annotated/boxes` | 同一批框的 `Boxes2D`，可悬停看标签与置信度 |
 | `camera/annotated/keypoints` | 仅 pose：关键点 `Points2D`，标签是 `nose`/`left_shoulder` 等 |
 | `camera/annotated/skeleton` | 仅 pose：骨架 `LineStrips2D`（两端都过 `kpt_conf` 才连） |
@@ -207,7 +207,6 @@ src/hik_person/
 ├── config.py    config.toml 读取 / 命令行覆盖 / 路径解析
 ├── colors.py    像素格式映射 + Bayer/BGR/RGB 转换
 ├── mvs.py       MVS 运行时环境、枚举、取流、测光、特性改写
-├── annotate.py  人数横幅（两条任务线共用）
 ├── detect.py    ultralytics YOLO 人体检测
 ├── pose.py      ultralytics YOLO 姿态（COCO-17 骨架）
 ├── viz.py       rerun 记录与布局（Image / Boxes2D / Points2D / LineStrips2D / Scalars）

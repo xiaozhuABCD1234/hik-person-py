@@ -18,8 +18,6 @@ from pathlib import Path
 
 import numpy as np
 
-from .annotate import draw_count_banner
-
 # 19 根骨头（0-based），顺序与 ultralytics 的 skeleton 一致
 SKELETON_17: tuple[tuple[int, int], ...] = (
     (15, 13),
@@ -171,4 +169,4 @@ class PoseEstimator:
                 )
 
         # result.plot() 自带骨架与关键点，直接用
-        return instances, draw_count_banner(result.plot(), len(instances))
+        return instances, np.ascontiguousarray(result.plot())

@@ -4,7 +4,7 @@
 记录到这些实体：
 
 ==================================  ========================================
-``camera/annotated``                标注图（框/骨架/人数横幅）
+``camera/annotated``                标注图（框/骨架，由模型的 plot() 画）
 ``camera/annotated/boxes``          框的 Boxes2D（可悬停看标签与置信度）
 ``camera/annotated/keypoints``      姿态关键点（带名称）
 ``camera/annotated/skeleton``       骨架连线

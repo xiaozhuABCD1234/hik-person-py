@@ -59,7 +59,7 @@ rate_tolerance = 0.9
 # 跑够 duration 秒或 max_frames 帧后退出；0 = 不限。
 duration = 0.0
 max_frames = 0
-# 检测到人时存标注图（含人数横幅）。
+# 检测到人时存标注图（模型画的框/骨架）。
 save_dir = ""
 save_min_interval = 1.0
 

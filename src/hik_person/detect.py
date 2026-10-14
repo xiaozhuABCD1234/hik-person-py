@@ -8,8 +8,6 @@ from pathlib import Path
 
 import numpy as np
 
-from .annotate import draw_count_banner
-
 PERSON_ALIASES = {"person", "people", "pedestrian", "human"}
 
 
@@ -46,7 +44,7 @@ class PersonDetector:
         )
 
     def __call__(self, bgr: np.ndarray) -> tuple[list[Detection], np.ndarray]:
-        """输入 BGR uint8，返回 (检测列表, 画好框与人数横幅的 BGR 图)。"""
+        """输入 BGR uint8，返回 (检测列表, 画好框的 BGR 图)。"""
         result = self.model.predict(
             bgr,
             conf=self.conf,
@@ -67,4 +65,4 @@ class PersonDetector:
                 boxes.xyxy.tolist(), boxes.conf.tolist(), boxes.cls.tolist(), strict=True
             )
         ]
-        return detections, draw_count_banner(result.plot(), len(detections))
+        return detections, np.ascontiguousarray(result.plot())
