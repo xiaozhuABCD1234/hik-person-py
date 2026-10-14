@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="hik-person",
         description="HIKROBOT MVS 相机 -> YOLO 人体检测 -> rerun；"
-        "颜色链路与 mvs_ws 的 mvs_camera 驱动一致",
+        "颜色统一为 BGR（SDK 转 BGR8_Packed）",
     )
     p.add_argument("--list", action="store_true", help="枚举相机后退出")
     p.add_argument("--serial", default="DA2360141", help="相机序列号")
@@ -50,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--exposure-us", type=float, default=8000.0, help="曝光(us)，0 = 保持设备设置")
     p.add_argument("--gain-db", type=float, default=0.0, help="增益(dB)，0 = 保持设备设置")
     p.add_argument("--no-rerun", action="store_true", help="不开 rerun，只打印")
+    p.add_argument(
+        "--rerun-save",
+        default="",
+        help="把 rerun 记录写成 .rrd 文件（不弹窗口，适合无桌面或留证据）",
+    )
     p.add_argument("--save-dir", default="", help="检测到人时保存标注图")
     p.add_argument("--duration", type=float, default=0.0, help="跑多少秒，0 = 不限")
     p.add_argument("--max-frames", type=int, default=0, help="处理多少帧后退出")
@@ -92,7 +97,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_rerun:
         from .viz import RerunView
 
-        view = RerunView()
+        rrd = args.rerun_save or None
+        view = RerunView(spawn=not rrd, save_path=rrd)
+        if rrd:
+            print(f"rerun 记录 -> {rrd}")
+            print(f"  打开方式: rerun {rrd}   （或拖进 rerun viewer）")
 
     save_dir = Path(args.save_dir) if args.save_dir else None
     if save_dir:

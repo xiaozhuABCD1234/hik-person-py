@@ -14,12 +14,21 @@ BOX_COLOR = (90, 220, 120)  # RGB
 
 
 class RerunView:
-    def __init__(self, app_id: str = "hik-person", spawn: bool = True):
+    def __init__(
+        self,
+        app_id: str = "hik-person",
+        *,
+        spawn: bool = True,
+        save_path: str | None = None,
+    ):
+        """spawn=True 弹 viewer；save_path 则把记录写成 .rrd（不弹窗口）。"""
         import rerun as rr
 
         self.rr = rr
         self._last_count = -1
         rr.init(app_id, spawn=spawn)
+        if save_path:
+            rr.save(str(save_path))
 
     def _set_time(self, frame_number: int) -> None:
         # 0.23+ 用 set_time(...)，更早的版本用 set_time_sequence

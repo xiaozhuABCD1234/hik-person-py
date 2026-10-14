@@ -12,11 +12,16 @@ uv run hik-person --list                 # 枚举相机
 uv run hik-person --duration 30          # 开 rerun 窗口跑 30 秒
 uv run hik-person --no-rerun --max-frames 300 --save-dir ~/Pictures/hik-person
 uv run python -m hik_person --device cpu --imgsz 480   # 也支持 -m 形式
+uv run hik-person --rerun-save /tmp/hik.rrd --max-frames 100   # 不弹窗口，落盘
+rerun /tmp/hik.rrd                                    # 事后回放
 ```
 
 `--device` 留空时自动选择：有 CUDA 用 `cuda:0`，否则 `cpu`。
 `--list` 会把虚拟相机一起列出来（本机是 `[1] ... sn=Vir62953321`），
 用 `--serial` 选物理那台。
+
+注意：弹窗模式（默认）下 rerun viewer 是另一个进程，会继承当前终端；
+在脚本/管道里跑就用 `--rerun-save` 落盘，别让 viewer 把 stdout 占住。
 
 ## 运行参数
 
@@ -32,6 +37,7 @@ uv run python -m hik_person --device cpu --imgsz 480   # 也支持 -m 形式
 | `--exposure-us` | 8000 | 曝光，0 = 保持设备设置 |
 | `--gain-db` | 0 | 增益，0 = 保持设备设置 |
 | `--no-rerun` | – | 不开 rerun，只在终端打印结果 |
+| `--rerun-save` | – | 把记录写成 `.rrd` 而不弹窗口（无桌面 / 留证据） |
 | `--save-dir` | – | 检测到人时保存标注图（最多 1 张/秒） |
 | `--duration` / `--max-frames` | 0 | 跑够时长/帧数后退出，0 = 不限 |
 
@@ -120,7 +126,7 @@ models/best.pt       训练好的权重
 ## 故障排查
 
 * `MV_CC_OpenDevice failed` —— 相机被别的进程占用（MVS 对 USB3 不强制互斥）：
-  `pgrep -a mvs_camera_node`，或关掉 MVS 客户端 / 另一个取流进程。
+  关掉 MVS 客户端，或停掉另一个正在取流的进程。
 * 枚举不到设备 —— 检查 USB3 线缆，以及 `/opt/MVS` 驱动与权限。
 * 颜色不对（红蓝互换）—— 检查是否绕过了 `colors.bgr_to_rgb()`。
   快速自检：对着明显偏红的物体比较 `frame.bgr[..., 2].mean()`（R）与

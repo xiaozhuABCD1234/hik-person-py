@@ -1,4 +1,4 @@
-"""MVS 运行时环境的单元测试 —— 纯函数，不需要相机、不加载 SDK。"""
+"""MVS SDK 需要的运行时环境变量 —— 纯函数，不需要相机、不加载 SDK。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from hik_person.mvs import MVS_LIB_DIR, MVS_ROOT, _apply_env, library_path_confi
 
 
 def test_apply_env_matches_driver_environment_hook() -> None:
-    """取值与 mvs_ws 的 mvs_camera_sdk.sh 一致。"""
+    """/opt/MVS 下 SDK 需要的几个变量。"""
     env = _apply_env({})
     assert env["MVCAM_SDK_PATH"] == MVS_ROOT
     assert env["MVCAM_COMMON_RUNENV"] == f"{MVS_ROOT}/lib"

@@ -199,7 +199,7 @@ class Camera:
         if ret != 0:
             raise MvsError(
                 f"MV_CC_OpenDevice failed: 0x{ret & 0xFFFFFFFF:08x} "
-                f"(同一台相机被别的进程占用？pgrep -a mvs_camera_node)"
+                f"(同一台相机被别的进程占用？关掉 MVS 客户端或另一个取流进程)"
             )
         return self
 
