@@ -22,3 +22,6 @@ shots/
 .idea/
 *.swp
 .DS_Store
+
+# 权重全部不入库（n/s/m/x 各档几十 MB 起；下载命令见 README「模型：YOLO 姿态」）
+models/*.pt

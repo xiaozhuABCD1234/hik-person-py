@@ -61,9 +61,10 @@ feature = ["ADCBitDepth=Bits_8"]
 
 [detector]
 # 姿态权重（ultralytics pose 任务）：给检测框 + 17 个 COCO 关键点，唯一一条任务线。
-# 相对路径按项目根解析。n/s/m/l/x 同一 API；这里选 m：n 档实测 7.4 ms/帧，
-# m 档 16.6 ms/帧（RTX 4060 Laptop，imgsz 640），15 Hz 的 66 ms 预算下更准。
-weights = "models/yolo26m-pose.pt"
+# 相对路径按项目根解析。n/s/m/l/x 同一 API；这里用 x：精度最高，但本机实测 36.3 ms/帧
+# （m 16.6 / n 7.4 ms）。x 档体积大（126 MB）不入库：不在 models/ 时按 README
+# 「模型：YOLO 姿态」里的命令下一次，或者 --weights models/yolo26m-pose.pt 退回自带档位。
+weights = "models/yolo26x-pose.pt"
 conf = 0.35
 imgsz = 640
 # "" = 有 CUDA 用 cuda:0，否则 cpu。
@@ -73,6 +74,8 @@ kpt_conf = 0.5
 
 [run]
 # 推理与可视化频率（相机更快时多余帧只取流不推理）。
+# 注意这是上限：x 档 pose+depth 一帧要 ~84 ms，实际只会跑到 ~12 Hz（不丢帧，只是
+# 推理频率低一点）。想真顶到 15 Hz 就换小一档权重（m 合计 31.8 ms）。
 detect_hz = 15.0
 # 限速容忍：帧到达时刻正好压在周期边界上时靠它避免白丢一半的帧（实测 15/15、30/15 都会）。
 rate_tolerance = 0.9
@@ -118,9 +121,11 @@ show_count = false
 enabled = true
 
 # depth 权重（ultralytics 的 depth 任务模型）。相对路径按项目根解析。
-# n/s/m/l/x 都在同一个 API 下；这里选 m：精度比 s 明显好，跟 m-pose 合计仍在 15 Hz 的
-# 66 ms 预算内（各档延迟见 README 的深度模型选型表）。换模型只改这一行。
-weights = "models/yolo26m-depth.pt"
+# n/s/m/l/x 都在同一个 API 下；这里用 x：精度最高，本机实测 44.0 ms/帧（m 22.0 /
+# s 13.6 / n 10.8 ms）。x 档同样不入库（115 MB），下载命令见 README。
+# 限度注意：x-pose + x-depth 一帧合计 ~84 ms，超过了 15 Hz 的 66 ms 预算，主循环
+# 会自然降到 ~12 Hz（不丢帧，只是推理频率低一点）；显存无压力（0.83 GB / 8 GB）。
+weights = "models/yolo26x-depth.pt"
 # 深度推理的输入边长。权重是在 768 训练/评测的，320 远没喂饱：实测跟 m@768 的
 # 一致度从 0.75（320）跳到 0.96（640），收益比换大模型还大。深度模型不便宜，
 # 没必要跟满 detect_hz（见 hz）。
