@@ -14,7 +14,7 @@ uv run hik-person --list             # 枚举相机
 uv run hik-person --show-config      # 打印合并后的生效参数
 uv run hik-person                    # 按 config.toml 跑（开 rerun 窗口）
 uv run hik-person --duration 30      # 临时覆盖某一项
-uv run hik-person --no-rerun --rerun-save out.rrd --max-frames 300
+uv run hik-person --no-rerun --max-frames 300     # 只看结果，不开窗口不写文件
 uv run hik-person --task pose --weights models/yolo26n-pose.pt   # 试姿态估计
 ```
 
@@ -26,9 +26,11 @@ uv run hik-person --task pose --weights models/yolo26n-pose.pt   # 试姿态估�
 [camera]
 serial = "DB1505178"          # 本机 MV-CB016-10UC-S
 camera_fps = 30.0             # 采集帧率上限
-brightness = 110.0            # 测光目标灰度；0 = 关测光
-exposure_us = 8000.0          # 测光起始值；0 = 用设备当前值
-gain_db = -1.0                # -1 = 用设备当前值（0 dB 是合法最小值）
+exposure_mode = "sdk"         # sdk = 相机自动曝光/增益；manual = 用下面的固定值
+brightness = 110.0            # AE 目标灰度（写进相机的 Brightness 特性）
+auto_gain_max_db = 16.98      # AE 允许的最大增益
+exposure_us = 8000.0          # manual 模式：0 = 用设备当前值
+gain_db = -1.0                # manual 模式：-1 = 用设备当前值（0 dB 是合法最小值）
 feature = ["ADCBitDepth=Bits_8"]   # 任意 GenICam 特性
 
 [detector]
@@ -108,31 +110,51 @@ uv run hik-person --task pose --weights models/yolo26n-pose.pt
 （那边用 `sk[0]-1` 取），抄表时很容易多一根或少一根，所以单元测试里卡了骨头数、索引范围、
 每个关键点至少出现在一根骨头里。
 
-## 曝光与增益（测光）
+## 曝光与增益
 
-默认先做一次**闭环测光**：量画面平均灰度，自己调曝光和增益。
-
-为什么不用相机的 `ExposureAuto`：这台相机**没有 `Brightness`（目标灰度）特性**，
-相机的自动曝光无法指定目标值。所以策略是**先动曝光，曝光顶到上限后再用增益补**
-（增益涨噪声，曝光不涨）：
+默认 `exposure_mode = "sdk"`：直接用**相机自己的**自动曝光与自动增益，程序不插手。
 
 ```
-测光: 目标灰度 110，曝光上限 30000 us（= 0.9 / camera_fps 30）
-  测光  1: 曝光   8000.0 us  增益 16.98 dB  ->  灰度  172.9  (目标 110)
-  测光  2: 曝光   5089.3 us  增益 16.98 dB  ->  灰度  138.6  (目标 110)
-  测光  3: 曝光   4040.4 us  增益 16.98 dB  ->  灰度  118.8  (目标 110)
-  -> 曝光 4040 us，增益 16.98 dB，灰度 118.8
+相机: Brightness = 110（int）
+相机: AutoExposureTimeUpperLimit = 30000（int）
+相机: AutoGainUpperLimit = 16.98（float）
+曝光/增益: 相机自动（目标灰度 110，曝光上限 30000 us，增益上限 16.98 dB）
+  -> 曝光 23140 us，增益 0.00 dB
+camera: ... exposure_us=23140.0, gain_db=0.0, resulting_fps=30.0
 ```
 
-* **曝光上限与帧率绑定**：`exposure_fps_headroom / camera_fps`，所以调亮不会偷偷把帧率带下去。
-  要高帧率就得拿亮度换，程序会如实警告并停止，而不是假装成功：
-  ```
-  警告: 没达到目标灰度（14.6 / 目标 110）：曝光与增益都已到边界。光线不够，
-        或者 camera_fps 太高压住了曝光上限
-  ```
-* 想自己上手动值就 `brightness = 0` + `exposure_us` / `gain_db`。
-* **相机会记住上次的曝光/增益**（存在相机里，不随进程退出丢），所以"起始值"取决于上一轮
-  跑成什么样；要干净复现就显式给值。
+三个特性要一起给对，否则会得到“又暗又是噪点”的结果：
+
+| 特性 | 类型 | 作用 |
+|---|---|---|
+| `Brightness` | **Int** | AE 目标灰度（0-255） |
+| `AutoExposureTimeUpperLimit` | **Int** | AE 曝光上限；不放开，AE 只能用增益变亮 |
+| `AutoGainUpperLimit` | **Float** | AE 增益上限（dB） |
+
+* **曝光上限 = `exposure_fps_headroom / camera_fps`**，默认 `0.9/30 s = 30000 us`：
+  既让 AE 有足够的调亮余地，又不会把帧率悄悄带下去。
+* 想自己上手动值就用 `exposure_mode = "manual"` + `exposure_us` / `gain_db`。
+* **相机会记住上次的曝光/增益**（存在相机里，不随进程退出丢），换进程不一定回到同一状态。
+
+踩过的坑（都跟错类型有关，写错时 SDK 只给一个 `0x80000109`，看着像“不支持”）：
+
+1. 这三项是 **Int / Int / Float**，不是统一的 Float。我一开始用 `GetFloatValue` 查
+   `Brightness`，报错后误判“这台相机没有目标灰度特性”，于是写了个量灰度自己调曝光的
+   闭环——而真正的问题只是类型用错，那个闭环反而把曝光拉到 30 ms + 增益拉满造成过曝。
+   现在闭环已删掉。
+2. 出厂 `AutoExposureTimeUpperLimit = 3828 us`（不是 30 ms），AE 被卡在这个天花板里，
+   只好把增益顶到设备上限 16.98 dB（满噪点），画面还很暗（灰度 52）。把它放到 30000 us 后，
+   AE 立刻改用曝光：**23140 us / 0.00 dB / 灰度 103**。
+
+不确定相机到底支持什么、当前值是什么，就 dump 一份特性表（不需要开 MVS 客户端）：
+
+```bash
+uv run python -c "
+from hik_person.mvs import Camera, load_sdk
+with Camera(load_sdk(), serial='DB1505178') as c:
+    print(c.cam.MV_CC_FeatureSave('/tmp/cam_features.mvcfg'))"
+grep -iE 'auto|bright|exposure|gain' /tmp/cam_features.mvcfg
+```
 
 ## 颜色链路
 
@@ -158,7 +180,34 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 
 ## 可视化（rerun）
 
-布局由 blueprint 显式指定，不依赖 rerun 的自动推断：
+**rerun 只当显示器：默认不往磁盘写任何文件。** 只有显式给 `--rerun-save` 才会写 `.rrd`。
+但 viewer 本身得把收到的数据留在内存里才能显示和回拖，这是它的工作原理，无法关闭；
+能做的只有给它一个上限，到顶就丢最旧数据：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `[rerun].memory_limit` | `2GB` | viewer 内存上限（rerun 自己的默认是 `75%`，本机约 23 GB） |
+| `[rerun].server_memory_limit` | `512MB` | 同进程的 gRPC 缓冲（给后到的 viewer 补数据） |
+| `[rerun].jpeg_quality` | `75` | 图像送进 viewer 前先压过；`0` = 送原图 |
+
+实测（1440×1080、15 Hz、同尺寸窗口）：
+
+| 送什么 | viewer 内存增长 | 每帧 |
+|---|---|---|
+| `rr.Image` 原图 | **+70 MB/s**（= 15 Hz × 4.67 MB） | 4.67 MB |
+| `.compress(jpeg_quality=75)` | **+4 MB/s** | ~0.3 MB |
+
+所以不改这两个默认值，跑几分钟 viewer 就会涨到几个 GB；而 rerun 落盘的 `.rrd` 看着小，
+是因为文件里又压了一道 —— **占内存的是 viewer 里那份解压后的数据**。
+
+### 画面自己缩放（已修）
+
+不设 `visual_bounds` 时，rerun 的 2D 视图按“**视图内数据的包围盒**”自动取景。
+检测框/关键点一伸出画面（人半出画就是这种），取景就跟着放大缩小，看着像画面在自己缩放。
+现在 `visual_bounds` 按图像尺寸钉死（第一帧时确定，分辨率变了才重发 blueprint），
+修复后同一段数据在两种情况下屏上尺寸逐像素相同（1168×875 px）。
+
+布局与实体：
 
 | 实体 | 内容 |
 |---|---|
@@ -171,9 +220,8 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 
 * 弹窗模式下 viewer 是**独立进程**，会继承当前终端；在脚本/管道里跑就用 `--rerun-save`，
   别让 viewer 把 stdout 占住。
-* `--rerun-save` 每帧写一张 1440×1080 的图，实测约 **8.5 MB/帧**（15 Hz 就是 128 MB/s）。
-  长跑别这么干：用 `--no-rerun --save-dir` 只留检测到人的帧（最多 1 张/秒，见
-  `save_min_interval`）。
+* 不想开窗口也不留文件，就用 `--no-rerun`；要只留检测到人的帧（最多 1 张/秒，见
+  `save_min_interval`）就用 `--no-rerun --save-dir`。
 
 ## 不需要任何 .sh
 
@@ -188,7 +236,7 @@ MVS SDK 的像素转换 / GenICam producer 库是 `dlopen` 时才加载的，而
 ```bash
 uv run ruff check .            # lint
 uv run ruff format --check .   # 格式
-uv run pytest                  # 69 个单元测试，都不需要相机
+uv run pytest                  # 不需要相机，也不需要模型权重
 uv run python tools/bench.py   # 分环节计时（等帧 / 转换 / 推理）
 ```
 

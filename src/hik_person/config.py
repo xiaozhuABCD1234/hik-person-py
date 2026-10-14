@@ -18,6 +18,8 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # src/hik_person/config.py -> 项目根
 DEFAULT_CONFIG_NAME = "config.toml"
 TASKS: tuple[str, ...] = ("detect", "pose")
+# 曝光/增益模式：sdk = 相机自动；manual = 固定值；software = 程序闭环
+EXPOSURE_MODES: tuple[str, ...] = ("sdk", "manual")
 
 
 @dataclass
@@ -30,8 +32,12 @@ class Settings:
     camera_fps: float = 30.0
     exposure_us: float = 8000.0
     gain_db: float = -1.0
+    # sdk = 相机自己的自动曝光 + 自动增益（默认）；manual = 固定用 exposure_us / gain_db
+    exposure_mode: str = "sdk"
+    # AE 允许的最大增益（dB）。增益比曝光噪得多，所以先大幅放宽曝光上限，再压住增益。
+    # -1 = 不动它（用相机当前值），0 = 不允许增益。
+    auto_gain_max_db: float = 16.98
     brightness: float = 110.0
-    brightness_tolerance: float = 12.0
     exposure_fps_headroom: float = 0.9
     read_timeout_ms: int = 1000
     feature: list[str] = field(default_factory=list)
@@ -55,7 +61,15 @@ class Settings:
 
     # ----------------------------------------------------------------- [rerun]
     rerun_enabled: bool = True
+    # 非空才写 .rrd（默认纯显示，不往磁盘记任何东西）
     rerun_save: str = ""
+    # viewer 内存上限，到了就丢最旧数据；rerun 自己的默认是 75%%（本机约 23 GB）
+    rerun_memory_limit: str = "2GB"
+    # 与 viewer 同进程的 gRPC 缓冲（给后到的 viewer 补数据用）
+    rerun_server_memory_limit: str = "512MB"
+    # 图像送进 viewer 前先压成 JPEG；0 = 原图（4.67 MB/帧，viewer 内存约差 10 倍）
+    rerun_jpeg_quality: int = 75
+    rerun_port: int = 9876
 
 
 # (section, key) -> Settings 字段名
@@ -63,10 +77,11 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("camera", "serial"): "serial",
     ("camera", "index"): "index",
     ("camera", "camera_fps"): "camera_fps",
+    ("camera", "exposure_mode"): "exposure_mode",
+    ("camera", "auto_gain_max_db"): "auto_gain_max_db",
     ("camera", "exposure_us"): "exposure_us",
     ("camera", "gain_db"): "gain_db",
     ("camera", "brightness"): "brightness",
-    ("camera", "brightness_tolerance"): "brightness_tolerance",
     ("camera", "exposure_fps_headroom"): "exposure_fps_headroom",
     ("camera", "read_timeout_ms"): "read_timeout_ms",
     ("camera", "feature"): "feature",
@@ -85,6 +100,10 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("run", "save_min_interval"): "save_min_interval",
     ("rerun", "enabled"): "rerun_enabled",
     ("rerun", "save"): "rerun_save",
+    ("rerun", "memory_limit"): "rerun_memory_limit",
+    ("rerun", "server_memory_limit"): "rerun_server_memory_limit",
+    ("rerun", "jpeg_quality"): "rerun_jpeg_quality",
+    ("rerun", "port"): "rerun_port",
 }
 
 # 命令行能覆盖的字段（argparse 里 default=None 表示"没给"）

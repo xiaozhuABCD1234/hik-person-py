@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 
 from .colors import bgr_to_rgb
@@ -47,24 +49,51 @@ class RerunView:
         spawn: bool = True,
         save_path: str | None = None,
         kpt_conf: float = 0.5,
+        memory_limit: str = "2GB",
+        server_memory_limit: str = "512MB",
+        jpeg_quality: int = 75,
+        port: int = 9876,
     ):
-        """spawn=True 弹 viewer；save_path 则把记录写成 .rrd（不弹窗口）。"""
+        """跑起来就弹 viewer（除非给了 save_path）。
+
+        viewer 只当显示器用：不给 save_path 就不往磁盘写任何东西；
+        memory_limit 到顶后 rerun 丢最旧数据，不会把整场会话堆在内存里。
+        """
         import rerun as rr
 
         self.rr = rr
         self.kpt_conf = kpt_conf
+        self.jpeg_quality = int(jpeg_quality)
         self._last_count: int | None = None  # None = 还没记录过人数
-        rr.init(app_id, spawn=spawn)
+        self._image_size: tuple[int, int] | None = None  # (宽, 高)，用于固定取景
+
+        rr.init(app_id, spawn=False)
         if save_path:
             rr.save(str(save_path))
-        self._send_blueprint()
+        elif spawn:
+            # rerun 默认 memory_limit="75%"（本机约 23 GB），这里显式压住
+            rr.spawn(
+                port=port,
+                memory_limit=memory_limit,
+                server_memory_limit=server_memory_limit,
+                hide_welcome_screen=True,
+            )
 
-    def _send_blueprint(self) -> None:
+    def _send_blueprint(self, width: int, height: int) -> None:
+        """布局 + 把 2D 视图的取景钉死在图像范围内。
+
+        不设 visual_bounds 时，rerun 按“视图内数据的包围盒”自动取景：检测框/关键点
+        一旦伸出画面（人半出画就是这样），取景就跟着放大缩小，看起来像画面在自动缩放。
+        """
         rrb = _blueprint_module()
+        view_args: dict = {"origin": "camera/annotated", "name": "检测框"}
+        # 老版本没有 VisualBounds2D：只能退回自动取景
+        with contextlib.suppress(AttributeError, TypeError):
+            view_args["visual_bounds"] = rrb.VisualBounds2D(x_range=[0, width], y_range=[0, height])
         try:
             blueprint = rrb.Blueprint(
                 rrb.Horizontal(
-                    rrb.Spatial2DView(origin="camera/annotated", name="检测框"),
+                    rrb.Spatial2DView(**view_args),
                     rrb.TimeSeriesView(origin="person/count", name="人数"),
                     column_shares=[3, 1],
                 ),
@@ -88,7 +117,13 @@ class RerunView:
         rr = self.rr
         self._set_time(frame.frame_number)
 
-        rr.log("camera/annotated", rr.Image(bgr_to_rgb(annotated_bgr)))
+        # 分辨率变了（换相机/换模式）才重发 blueprint，把取景钉到新尺寸
+        height, width = annotated_bgr.shape[:2]
+        if (width, height) != self._image_size:
+            self._image_size = (width, height)
+            self._send_blueprint(width, height)
+
+        rr.log("camera/annotated", self._encode(annotated_bgr))
         instances = [*detections, *poses]
         self._log_boxes(instances)
         if poses:
@@ -106,6 +141,19 @@ class RerunView:
                     f"{count} person(s): " + ", ".join(f"conf={d.conf:.2f}" for d in instances)
                 ),
             )
+
+    def _encode(self, bgr: np.ndarray):
+        """按 jpeg_quality 压过再送。
+
+        原图（1440×1080）每帧 4.67 MB，viewer 得把它整份留着供回拖，内存实测 +70 MB/s；
+        压成 JPEG 后每帧约 0.13 MB，+4 MB/s。压过的只是一份显示副本，
+        `--save-dir` 存的图仍是原分辨率。
+        """
+        rr = self.rr
+        image = rr.Image(bgr_to_rgb(bgr))
+        if self.jpeg_quality > 0 and hasattr(image, "compress"):
+            return image.compress(jpeg_quality=self.jpeg_quality)
+        return image
 
     def _log_boxes(self, instances) -> None:
         rr = self.rr

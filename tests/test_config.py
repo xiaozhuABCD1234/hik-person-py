@@ -41,7 +41,8 @@ camera_fps = 249.0
 exposure_us = 3500
 gain_db = 0
 brightness = 120.5
-brightness_tolerance = 8
+auto_gain_max_db = 6.0
+exposure_mode = "manual"
 exposure_fps_headroom = 0.8
 read_timeout_ms = 500
 feature = ["ADCBitDepth=Bits_8", "GammaEnable=true"]
@@ -75,7 +76,8 @@ save = "/tmp/out.rrd"
     assert settings.exposure_us == 3500.0  # 整数写成浮点
     assert settings.gain_db == 0.0  # 0 dB 是合法值，不能退化
     assert settings.brightness == 120.5
-    assert settings.brightness_tolerance == 8.0
+    assert settings.auto_gain_max_db == 6.0
+    assert settings.exposure_mode == "manual"
     assert settings.exposure_fps_headroom == 0.8
     assert settings.read_timeout_ms == 500
     assert settings.feature == ["ADCBitDepth=Bits_8", "GammaEnable=true"]

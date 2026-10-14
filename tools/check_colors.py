@@ -57,25 +57,27 @@ def main() -> int:
         save_dir.mkdir(parents=True, exist_ok=True)
 
     with Camera(sdk, serial=serial) as cam:
+        # 颜色比对前先让相机 AE 把画面调亮，否则存下来的图是黑的，不好肉眼比对
         cam.configure(
-            exposure_us=settings.exposure_us, gain_db=settings.gain_db, fps=settings.camera_fps
+            exposure_us=settings.exposure_us,
+            gain_db=settings.gain_db,
+            fps=settings.camera_fps,
+            exposure_auto="Continuous",
+            gain_auto="Continuous",
+            auto_brightness=settings.brightness,
+            auto_exposure_upper_us=(
+                round(settings.exposure_fps_headroom * 1e6 / settings.camera_fps)
+                if settings.camera_fps > 0
+                else None
+            ),
+            auto_gain_upper_db=settings.auto_gain_max_db,
+            feature_overrides=settings.feature,
         )
         cam.start()
-        # 先测光，否则存下来的图是黑的，不好肉眼比对颜色
-        exposure_upper = (
-            settings.exposure_fps_headroom * 1e6 / settings.camera_fps
-            if settings.camera_fps > 0
-            else None
-        )
-        metered = cam.auto_expose(
-            target=settings.brightness,
-            tolerance=settings.brightness_tolerance,
-            exposure_upper_us=exposure_upper,
-        )
-        print(
-            f"测光: 曝光 {metered['exposure_us']:.0f} us，增益 {metered['gain_db']:.2f} dB，"
-            f"灰度 {metered['brightness']:.1f}"
-        )
+        for _ in range(10):  # 等相机 AE 收敛
+            cam.read()
+        settled = cam.settings()
+        print(f"测光: 曝光 {settled['exposure_us']:.0f} us，增益 {settled['gain_db']:.2f} dB")
 
         got = None
         for _ in range(100):

@@ -14,17 +14,26 @@ index = 0
 # Bits_8 -> 249.1 fps，Bits_12 -> 165.4 fps，见下面的 feature。
 camera_fps = 30.0
 
-# 测光：目标平均灰度（0-255）。0 = 关闭测光，直接用下面的曝露/增益。
-# 这台相机没有 Brightness（目标灰度）特性，相机的自动曝光无法指定目标，
-# 所以由程序量灰度、按"先加曝光、曝光到上限再用增益补"的方式闭环调整。
-brightness = 110.0
-brightness_tolerance = 12.0
+# 曝光/增益：
+#   "sdk"    = 用相机自己的自动曝光 + 自动增益（默认，推荐）
+#   "manual" = 固定用下面的 exposure_us / gain_db
+exposure_mode = "sdk"
 
-# 曝光上限 = exposure_fps_headroom / camera_fps，保证调亮不会把帧率带下去。
+# AE 目标灰度（写进相机的 Brightness 特性，0-255）。仅 "sdk" 模式用。
+brightness = 110.0
+
+# AE 允许的最大增益（dB）。增益比曝光噪得多，所以先把曝光上限放开，再压住增益。
+# -1 = 不动它（用相机当前值）。
+auto_gain_max_db = 16.98
+
+# AE 的曝光上限 = exposure_fps_headroom / camera_fps（秒）：既能调亮又不拖累帧率。
+# 踩过的坑：这台相机 AutoExposureTimeUpperLimit 出厂只有 3828 us，AE 被卡在这个
+# 天花板里，于是只能把增益拉到 16.98 dB（设备上限 = 满噪点）而画面仍然很暗。
+# 这个特性是 Int（不是 Float），用 SetFloatValue 写会得到 0x80000109，看着像“不支持”。
 exposure_fps_headroom = 0.9
 
-# 测光的起始值（也会在 brightness = 0 时直接生效）。
-# exposure_us：0 = 用设备当前值；gain_db：-1 = 用设备当前值，0 dB 是该机型合法的最小增益。
+# "manual" 模式的曝光/增益。exposure_us：0 = 用设备当前值；
+# gain_db：-1 = 用设备当前值（0 dB 是该机型合法的最小增益，不能当哨兵值）。
 exposure_us = 8000.0
 gain_db = -1.0
 
@@ -65,5 +74,15 @@ save_min_interval = 1.0
 
 [rerun]
 enabled = true
-# 非空则写 .rrd 且不弹窗口（实测约 8.5 MB/帧，长跑慎用）。
+# 默认纯显示：不写任何文件。非空才写 .rrd 且不弹窗口（调试/无桌面时才用）。
 save = ""
+# viewer 内存上限，到顶就丢最旧数据、不把整场会话堆在内存里。
+# rerun 自己的默认是 75%（本机约 23 GB），长跑会把内存吃满。
+memory_limit = "2GB"
+server_memory_limit = "512MB"
+# 图像送进 viewer 前先压成 JPEG（质量 1-100，0 = 不压原图）。
+# 原图 1440×1080 每帧 4.67 MB，viewer 内存增长实测 +70 MB/s；
+# 75 时每帧约 0.13 MB，增长 +4 MB/s（约 1/12）。
+jpeg_quality = 75
+# viewer 的端口；被占用时 rerun 会直接拿来用。
+port = 9876

@@ -18,7 +18,15 @@ import time
 from dataclasses import fields
 
 from .colors import pixel_type_name
-from .config import TASKS, Settings, apply_cli, default_config_path, load_settings, resolve_path
+from .config import (
+    EXPOSURE_MODES,
+    TASKS,
+    Settings,
+    apply_cli,
+    default_config_path,
+    load_settings,
+    resolve_path,
+)
 from .mvs import (
     Camera,
     MvsError,
@@ -50,9 +58,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--exposure-us", type=float, default=None, help="覆盖 [camera].exposure_us")
     p.add_argument("--gain-db", type=float, default=None, help="覆盖 [camera].gain_db")
     p.add_argument(
-        "--brightness", type=float, default=None, help="覆盖 [camera].brightness；0 = 关闭测光"
+        "--exposure-mode",
+        default=None,
+        choices=EXPOSURE_MODES,
+        help="覆盖 [camera].exposure_mode：sdk（相机自动）/manual",
     )
-    p.add_argument("--brightness-tolerance", type=float, default=None)
+    p.add_argument(
+        "--brightness", type=float, default=None, help="覆盖 [camera].brightness（AE 目标灰度）"
+    )
+    p.add_argument("--auto-gain-max-db", type=float, default=None)
     p.add_argument("--exposure-fps-headroom", type=float, default=None)
     p.add_argument("--read-timeout-ms", type=int, default=None)
     p.add_argument(
@@ -89,7 +103,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--rerun-save",
         default=None,
-        help="覆盖 [rerun].save：写成 .rrd 且不弹窗口（无桌面 / 留证据）",
+        help="覆盖 [rerun].save：写成 .rrd 且不弹窗口（默认不写文件）",
+    )
+    p.add_argument(
+        "--rerun-memory-limit",
+        default=None,
+        help='覆盖 [rerun].memory_limit，如 "2GB"/"75%%"',
+    )
+    p.add_argument(
+        "--rerun-jpeg-quality",
+        type=int,
+        default=None,
+        help="覆盖 [rerun].jpeg_quality：1-100，0 = 送原图（更吃内存）",
     )
     return p
 
@@ -115,6 +140,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.show_config:
         print_settings(settings, args.config)
         return 0
+
+    if settings.exposure_mode not in EXPOSURE_MODES:
+        print(
+            f"error: [camera].exposure_mode = {settings.exposure_mode!r} 不认识，"
+            f"可选 {EXPOSURE_MODES}",
+            file=sys.stderr,
+        )
+        return 2
 
     if settings.task not in TASKS:
         print(
@@ -183,13 +216,24 @@ def main(argv: list[str] | None = None) -> int:
         from .viz import RerunView
 
         rrd = settings.rerun_save or None
-        view = RerunView(spawn=not rrd, save_path=rrd, kpt_conf=settings.kpt_conf)
+        view = RerunView(
+            spawn=not rrd,
+            save_path=rrd,
+            kpt_conf=settings.kpt_conf,
+            memory_limit=settings.rerun_memory_limit,
+            server_memory_limit=settings.rerun_server_memory_limit,
+            jpeg_quality=settings.rerun_jpeg_quality,
+            port=settings.rerun_port,
+        )
         if rrd:
             print(f"rerun 记录 -> {rrd}")
             print(f"  打开方式: rerun {rrd}   （或拖进 rerun viewer）")
         else:
-            print("rerun: 已启动 viewer 窗口（独立进程，关掉窗口不影响本程序）")
-            print("  不要窗口就用 --rerun-save out.rrd 或 --no-rerun")
+            print(
+                f"rerun: viewer 已启动（内存上限 {settings.rerun_memory_limit}，"
+                f"到顶丢最旧数据；图像 JPEG {settings.rerun_jpeg_quality}）"
+            )
+            print("  不要窗口就用 --no-rerun")
 
     save_dir = resolve_path(settings.save_dir) if settings.save_dir else None
     if save_dir:
@@ -199,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"run   : {settings.task}, detect {settings.detect_hz:g} Hz"
         f"（相机 {settings.camera_fps:g} fps 上限）, imgsz {settings.imgsz}, "
-        f"conf {settings.conf:g}, brightness {settings.brightness:g}, "
+        f"conf {settings.conf:g}, 曝光 {settings.exposure_mode}, "
         f"feature {settings.feature or '[]'}"
     )
 
@@ -213,57 +257,48 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         with Camera(sdk, serial=settings.serial or None, index=settings.index) as cam:
+            auto = settings.exposure_mode == "sdk"
+            # 相机 AE 的曝光上限：按帧率留 0.9 的余量，否则 AE 只能靠拉增益变亮
+            auto_exposure_upper = (
+                round(settings.exposure_fps_headroom * 1e6 / settings.camera_fps)
+                if settings.camera_fps > 0
+                else None
+            )
             cam.configure(
                 exposure_us=settings.exposure_us,
                 gain_db=settings.gain_db,
                 fps=settings.camera_fps,
+                # Continuous = 交给相机自己的自动曝光/自动增益
+                exposure_auto="Continuous" if auto else "Off",
+                gain_auto="Continuous" if auto else "Off",
+                auto_brightness=settings.brightness if auto and settings.brightness > 0 else None,
+                auto_exposure_upper_us=auto_exposure_upper if auto else None,
+                auto_gain_upper_db=settings.auto_gain_max_db if auto else None,
                 feature_overrides=settings.feature,
             )
             for item in cam.applied_features:
                 print(f"feature: {item}")
             for note in cam.notes:
-                print(f"warning: {note}", file=sys.stderr)
+                print(f"相机: {note}")
             cam.start()
 
-            # 测光：相机没有 Brightness（目标灰度）特性，自动曝光无法指定目标，
-            # 所以自己量灰度、自己算。曝光上限按帧率约束，曝光写不下再用增益补。
-            if settings.brightness > 0:
-                exposure_upper = (
-                    settings.exposure_fps_headroom * 1e6 / settings.camera_fps
-                    if settings.camera_fps > 0
-                    else None
-                )
+            if auto:
+                # 相机自己的 AE：等它自己收敛，程序不插手
                 print(
-                    f"测光: 目标灰度 {settings.brightness:g}，曝光上限 "
-                    + (
-                        f"{exposure_upper:.0f} us"
-                        f"（= {settings.exposure_fps_headroom:g} / camera_fps"
-                        f" {settings.camera_fps:g}）"
-                        if exposure_upper
-                        else "设备最大值"
-                    )
+                    f"曝光/增益: 相机自动（目标灰度 {settings.brightness:g}，"
+                    f"曝光上限 {auto_exposure_upper} us，增益上限 "
+                    f"{settings.auto_gain_max_db:g} dB）"
+                    if auto_exposure_upper is not None
+                    else "曝光/增益: 相机自动"
                 )
-                metered = cam.auto_expose(
-                    target=settings.brightness,
-                    tolerance=settings.brightness_tolerance,
-                    exposure_upper_us=exposure_upper,
-                    verbose=print,
-                )
+                for _ in range(10):
+                    cam.read()
+                settled = cam.settings()
                 print(
-                    f"  -> 曝光 {metered['exposure_us']:.0f} us，"
-                    f"增益 {metered['gain_db']:.2f} dB，灰度 {metered['brightness']:.1f}"
+                    f"  -> 曝光 {settled['exposure_us']:.0f} us，增益 {settled['gain_db']:.2f} dB"
                 )
-                if not metered["reached"]:
-                    why = {
-                        "at_limits": "曝光与增益都已到边界",
-                        "max_iters": f"{metered['iterations']} 次迭代仍未收敛",
-                    }.get(metered["reason"], metered["reason"])
-                    print(
-                        f"  警告: 没达到目标灰度（{metered['brightness']:.1f} / 目标 "
-                        f"{settings.brightness:g}）：{why}。光线不够，"
-                        f"或者 camera_fps 太高压住了曝光上限",
-                        file=sys.stderr,
-                    )
+            elif settings.exposure_mode == "manual":
+                print(f"曝光/增益: 固定 {settings.exposure_us:.0f} us / {settings.gain_db:g} dB")
 
             camera_settings = cam.settings()
             print("camera: " + ", ".join(f"{k}={v}" for k, v in camera_settings.items()))
