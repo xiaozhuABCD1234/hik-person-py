@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 
 from hik_person.colors import BAYER_RG8, pixel_type_name
+from hik_person.config import default_config_path, load_settings
 from hik_person.mvs import Camera, load_sdk
 
 
@@ -37,20 +38,40 @@ def stats(image: np.ndarray, reference: np.ndarray) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--serial", default="DA2360141")
+    parser.add_argument("--config", default=str(default_config_path()))
+    parser.add_argument("--serial", default=None, help="默认取 config.toml 的 [camera].serial")
     parser.add_argument("--save-dir", default="")
     args = parser.parse_args()
+
+    settings, warnings = load_settings(args.config)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    serial = args.serial or settings.serial
+    if not serial:
+        print("error: 没指定相机（config.toml 的 [camera].serial 为空）", file=sys.stderr)
+        return 2
 
     sdk = load_sdk()
     save_dir = Path(args.save_dir) if args.save_dir else None
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
 
-    with Camera(sdk, serial=args.serial) as cam:
-        cam.configure(exposure_us=8000.0, fps=15.0)
+    with Camera(sdk, serial=serial) as cam:
+        cam.configure(
+            exposure_us=settings.exposure_us, gain_db=settings.gain_db, fps=settings.camera_fps
+        )
         cam.start()
         # 先测光，否则存下来的图是黑的，不好肉眼比对颜色
-        metered = cam.auto_expose(target=110.0, exposure_upper_us=0.9e6 / 15.0)
+        exposure_upper = (
+            settings.exposure_fps_headroom * 1e6 / settings.camera_fps
+            if settings.camera_fps > 0
+            else None
+        )
+        metered = cam.auto_expose(
+            target=settings.brightness,
+            tolerance=settings.brightness_tolerance,
+            exposure_upper_us=exposure_upper,
+        )
         print(
             f"测光: 曝光 {metered['exposure_us']:.0f} us，增益 {metered['gain_db']:.2f} dB，"
             f"灰度 {metered['brightness']:.1f}"

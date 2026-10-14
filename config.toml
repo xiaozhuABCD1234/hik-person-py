@@ -1,0 +1,63 @@
+# hik-person 参数文件
+#
+# 优先级：命令行 > 本文件 > 代码里的兜底默认值。
+# 未知键名会被警告（不会静默忽略），类型不对也会警告并忽略该项。
+# 命令行想临时覆盖就见 `uv run hik-person --help`。
+
+[camera]
+# 本机 MV-CB016-10UC-S；用 `uv run hik-person --list` 看所有可选相机。
+# 留空则按下面的 index 在"物理相机"里数（虚拟相机不占号）。
+serial = "DB1505178"
+index = 0
+
+# 采集帧率上限（0 = 保持设备设置）。这台机型的实际上限取决于 ADCBitDepth：
+# Bits_8 -> 249.1 fps，Bits_12 -> 165.4 fps，见下面的 feature。
+camera_fps = 30.0
+
+# 测光：目标平均灰度（0-255）。0 = 关闭测光，直接用下面的曝露/增益。
+# 这台相机没有 Brightness（目标灰度）特性，相机的自动曝光无法指定目标，
+# 所以由程序量灰度、按"先加曝光、曝光到上限再用增益补"的方式闭环调整。
+brightness = 110.0
+brightness_tolerance = 12.0
+
+# 曝光上限 = exposure_fps_headroom / camera_fps，保证调亮不会把帧率带下去。
+exposure_fps_headroom = 0.9
+
+# 测光的起始值（也会在 brightness = 0 时直接生效）。
+# exposure_us：0 = 用设备当前值；gain_db：-1 = 用设备当前值，0 dB 是该机型合法的最小增益。
+exposure_us = 8000.0
+gain_db = -1.0
+
+# 取一帧的等待上限（毫秒）。低于相机帧间隔会开始丢帧。
+read_timeout_ms = 1000
+
+# 任意 GenICam 特性，格式 "NAME=VALUE"。
+# ADCBitDepth=Bits_8 让这台相机从 165.4 fps 解锁到 249.1 fps（实测，需配合
+# camera_fps 一起放开）。不想动就设成空数组 []。
+feature = ["ADCBitDepth=Bits_8"]
+
+[detector]
+# 相对路径按项目根解析。
+weights = "models/best.pt"
+conf = 0.35
+iou = 0.50
+imgsz = 640
+# "" = 有 CUDA 用 cuda:0，否则 cpu。
+device = ""
+
+[run]
+# 推理与可视化频率（相机更快时多余帧只取流不推理）。
+detect_hz = 15.0
+# 限速容忍：帧到达时刻正好压在周期边界上时靠它避免白丢一半的帧（实测 15/15、30/15 都会）。
+rate_tolerance = 0.9
+# 跑够 duration 秒或 max_frames 帧后退出；0 = 不限。
+duration = 0.0
+max_frames = 0
+# 检测到人时存标注图（含人数横幅）。
+save_dir = ""
+save_min_interval = 1.0
+
+[rerun]
+enabled = true
+# 非空则写 .rrd 且不弹窗口（实测约 8.5 MB/帧，长跑慎用）。
+save = ""

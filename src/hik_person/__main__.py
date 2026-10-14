@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """hik-person: HIKROBOT MVS 相机 -> YOLO 人体检测 -> rerun。
 
-uv run hik-person --list
-uv run hik-person --duration 30
-uv run hik-person --no-rerun --max-frames 300
+参数都放在 config.toml（见 `--show-config` 看生效值）；命令行只用来临时覆盖。
+
+    uv run hik-person --list            # 枚举相机
+    uv run hik-person                   # 按 config.toml 跑
+    uv run hik-person --show-config     # 打印合并后的生效参数
+    uv run hik-person --duration 30
+    uv run hik-person --no-rerun --max-frames 300
 """
 
 from __future__ import annotations
@@ -11,75 +15,111 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from pathlib import Path
+from dataclasses import fields
 
 from .colors import pixel_type_name
-from .mvs import Camera, MvsError, ensure_runtime_environment, list_devices, load_sdk
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]  # src/hik_person/__main__.py -> 项目根
-DEFAULT_WEIGHTS = PROJECT_ROOT / "models" / "best.pt"
-
-
-def resolve_weights(explicit: str | None) -> str:
-    if explicit:
-        return explicit
-    if DEFAULT_WEIGHTS.is_file():
-        return str(DEFAULT_WEIGHTS)
-    raise FileNotFoundError(
-        f"找不到 {DEFAULT_WEIGHTS}；用 --weights 指定，或把 best.pt 复制到 models/"
-    )
+from .config import Settings, apply_cli, default_config_path, load_settings, resolve_path
+from .mvs import (
+    Camera,
+    MvsError,
+    ensure_runtime_environment,
+    list_devices,
+    load_sdk,
+    parse_feature_spec,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="hik-person",
-        description="HIKROBOT MVS 相机 -> YOLO 人体检测 -> rerun；"
-        "颜色统一为 BGR（SDK 转 BGR8_Packed）",
+        description="HIKROBOT MVS 相机 -> YOLO 人体检测 -> rerun。"
+        "参数默认读 config.toml，命令行只做临时覆盖",
     )
+    p.add_argument(
+        "--config",
+        default=str(default_config_path()),
+        help="参数文件（默认项目根的 config.toml）",
+    )
+    p.add_argument("--show-config", action="store_true", help="打印生效参数后退出")
     p.add_argument("--list", action="store_true", help="枚举相机后退出")
-    p.add_argument("--serial", default="DA2360141", help="相机序列号")
-    p.add_argument("--index", type=int, default=0, help="按枚举序号选相机")
-    p.add_argument("--weights", default=None, help="默认 models/best.pt")
-    p.add_argument("--conf", type=float, default=0.35)
-    p.add_argument("--iou", type=float, default=0.50)
-    p.add_argument("--imgsz", type=int, default=640)
-    p.add_argument("--device", default="", help="'', cuda:0, cpu")
+
+    # 下面这些 default=None 表示"命令行没给"，值交给 config.toml / 兜底默认值
+    p.add_argument("--serial", default=None, help="覆盖 [camera].serial")
+    p.add_argument("--index", type=int, default=None, help="覆盖 [camera].index")
+    p.add_argument("--camera-fps", type=float, default=None, help="覆盖 [camera].camera_fps")
+    p.add_argument("--exposure-us", type=float, default=None, help="覆盖 [camera].exposure_us")
+    p.add_argument("--gain-db", type=float, default=None, help="覆盖 [camera].gain_db")
     p.add_argument(
-        "--detect-hz", type=float, default=15.0, help="推理/可视化频率（相机更快就跳帧）"
+        "--brightness", type=float, default=None, help="覆盖 [camera].brightness；0 = 关闭测光"
     )
-    p.add_argument("--camera-fps", type=float, default=15.0, help="相机帧率上限，0 = 保持设备设置")
+    p.add_argument("--brightness-tolerance", type=float, default=None)
+    p.add_argument("--exposure-fps-headroom", type=float, default=None)
+    p.add_argument("--read-timeout-ms", type=int, default=None)
     p.add_argument(
-        "--brightness",
-        type=float,
-        default=110.0,
-        help="测光目标：平均灰度 0-255。0 = 关闭测光，直接用 --exposure-us/--gain-db",
+        "--feature",
+        action="append",
+        default=None,
+        metavar="NAME=VALUE",
+        help="覆盖 [camera].feature（给了就整体替换，可重复）。"
+        "例：--feature ADCBitDepth=Bits_8 解锁 249 fps",
     )
-    p.add_argument(
-        "--exposure-us",
-        type=float,
-        default=8000.0,
-        help="曝光(us)，0 = 用设备当前值；测光开启时作为起始值",
+    p.add_argument("--weights", default=None, help="覆盖 [detector].weights")
+    p.add_argument("--conf", type=float, default=None, help="覆盖 [detector].conf")
+    p.add_argument("--iou", type=float, default=None, help="覆盖 [detector].iou")
+    p.add_argument("--imgsz", type=int, default=None, help="覆盖 [detector].imgsz")
+    p.add_argument("--device", default=None, help="覆盖 [detector].device：''/cuda:0/cpu")
+    p.add_argument("--detect-hz", type=float, default=None, help="覆盖 [run].detect_hz")
+    p.add_argument("--duration", type=float, default=None, help="覆盖 [run].duration")
+    p.add_argument("--max-frames", type=int, default=None, help="覆盖 [run].max_frames")
+    p.add_argument("--save-dir", default=None, help="覆盖 [run].save_dir")
+
+    rerun_group = p.add_mutually_exclusive_group()
+    rerun_group.add_argument(
+        "--rerun", dest="rerun_enabled", action="store_true", default=None, help="开 rerun viewer"
     )
-    p.add_argument(
-        "--gain-db",
-        type=float,
-        default=-1.0,
-        help="增益 dB（该机型 0~17）。0 是合法值；-1 = 用设备当前值。测光开启时作为起始值",
+    rerun_group.add_argument(
+        "--no-rerun",
+        dest="rerun_enabled",
+        action="store_false",
+        default=None,
+        help="不开 rerun，只打印",
     )
-    p.add_argument("--no-rerun", action="store_true", help="不开 rerun，只打印")
     p.add_argument(
         "--rerun-save",
-        default="",
-        help="把 rerun 记录写成 .rrd 文件（不弹窗口，适合无桌面或留证据）",
+        default=None,
+        help="覆盖 [rerun].save：写成 .rrd 且不弹窗口（无桌面 / 留证据）",
     )
-    p.add_argument("--save-dir", default="", help="检测到人时保存标注图")
-    p.add_argument("--duration", type=float, default=0.0, help="跑多少秒，0 = 不限")
-    p.add_argument("--max-frames", type=int, default=0, help="处理多少帧后退出")
     return p
+
+
+def print_settings(settings: Settings, config_path: str) -> None:
+    print(f"# {config_path}")
+    for spec in fields(settings):
+        print(f"{spec.name} = {getattr(settings, spec.name)!r}")
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    try:
+        settings, config_warnings = load_settings(args.config)
+    except (OSError, ValueError) as exc:  # TOMLDecodeError 也是 ValueError
+        print(f"error: 读参数文件失败: {exc}", file=sys.stderr)
+        return 2
+    settings = apply_cli(settings, args)
+    for warning in config_warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+
+    if args.show_config:
+        print_settings(settings, args.config)
+        return 0
+
+    for spec in settings.feature:
+        try:
+            parse_feature_spec(spec)
+        except ValueError as exc:
+            print(f"error: [camera].feature 里的 {exc}", file=sys.stderr)
+            return 2
 
     try:
         ensure_runtime_environment()  # 必要时 execve 重启自己，补齐 MVS 环境
@@ -90,31 +130,36 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list:
         for device in list_devices(sdk):
-            print(f"[{device.index}] {device.layer:5s} {device.model}  sn={device.serial}")
+            tag = "  (虚拟, 打不开)" if device.virtual else ""
+            print(f"[{device.index}] {device.layer:5s} {device.model}  sn={device.serial}{tag}")
         sdk.MvCamera.MV_CC_Finalize()
         return 0
 
     from .detect import PersonDetector
 
-    try:
-        weights = resolve_weights(args.weights)
-    except FileNotFoundError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    # 配置里把 weights 写成空串就用 Settings 里的兜底默认值
+    weights_value = settings.weights or Settings().weights
+    weights_path = resolve_path(weights_value)
+    if not weights_path.is_file():
+        print(
+            f"error: 找不到权重 {weights_path}（[detector].weights = {weights_value!r}）",
+            file=sys.stderr,
+        )
         return 2
 
     detector = PersonDetector(
-        weights,
-        device=args.device or None,
-        conf=args.conf,
-        iou=args.iou,
-        imgsz=args.imgsz,
+        weights_path,
+        device=settings.device or None,
+        conf=settings.conf,
+        iou=settings.iou,
+        imgsz=settings.imgsz,
     )
 
     view = None
-    if not args.no_rerun:
+    if settings.rerun_enabled:
         from .viz import RerunView
 
-        rrd = args.rerun_save or None
+        rrd = settings.rerun_save or None
         view = RerunView(spawn=not rrd, save_path=rrd)
         if rrd:
             print(f"rerun 记录 -> {rrd}")
@@ -123,39 +168,60 @@ def main(argv: list[str] | None = None) -> int:
             print("rerun: 已启动 viewer 窗口（独立进程，关掉窗口不影响本程序）")
             print("  不要窗口就用 --rerun-save out.rrd 或 --no-rerun")
 
-    save_dir = Path(args.save_dir) if args.save_dir else None
+    save_dir = resolve_path(settings.save_dir) if settings.save_dir else None
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
 
-    period = 1.0 / max(args.detect_hz, 0.1)
-    # 容忍 10%：相机帧率正好是 detect_hz 的整数倍时，帧到达时刻会恰好压在周期边界上，
-    # 那时纯靠抖动决定处理还是丢掉，会白丢约一半的帧（实测 15/15 与 30/15 都会）。
-    min_gap = period * 0.9
+    print(f"config: {args.config}")
+    print(
+        f"run   : detect {settings.detect_hz:g} Hz（相机 {settings.camera_fps:g} fps 上限）, "
+        f"imgsz {settings.imgsz}, conf {settings.conf:g}, "
+        f"brightness {settings.brightness:g}, feature {settings.feature or '[]'}"
+    )
+
+    period = 1.0 / max(settings.detect_hz, 0.1)
+    # 帧到达时刻正好压在周期边界上时纯靠抖动决定去留，会白丢约一半的帧
+    # （实测 15/15 与 30/15 都会），所以留一点容差。倍数在 config.toml 里。
+    min_gap = period * settings.rate_tolerance
     processed = skipped = 0
     last_count = -1
     t_start = t_last = t_last_save = time.monotonic()
 
     try:
-        with Camera(sdk, serial=args.serial or None, index=args.index) as cam:
-            cam.configure(exposure_us=args.exposure_us, gain_db=args.gain_db, fps=args.camera_fps)
+        with Camera(sdk, serial=settings.serial or None, index=settings.index) as cam:
+            cam.configure(
+                exposure_us=settings.exposure_us,
+                gain_db=settings.gain_db,
+                fps=settings.camera_fps,
+                feature_overrides=settings.feature,
+            )
+            for item in cam.applied_features:
+                print(f"feature: {item}")
             for note in cam.notes:
                 print(f"warning: {note}", file=sys.stderr)
             cam.start()
 
-            # 测光：这台相机没有 Brightness（目标灰度）特性，相机的自动曝光无法指定目标，
+            # 测光：相机没有 Brightness（目标灰度）特性，自动曝光无法指定目标，
             # 所以自己量灰度、自己算。曝光上限按帧率约束，曝光写不下再用增益补。
-            if args.brightness > 0:
-                exposure_upper = 0.9e6 / args.camera_fps if args.camera_fps > 0 else None
+            if settings.brightness > 0:
+                exposure_upper = (
+                    settings.exposure_fps_headroom * 1e6 / settings.camera_fps
+                    if settings.camera_fps > 0
+                    else None
+                )
                 print(
-                    f"测光: 目标灰度 {args.brightness:g}，曝光上限 "
+                    f"测光: 目标灰度 {settings.brightness:g}，曝光上限 "
                     + (
-                        f"{exposure_upper:.0f} us（受 --camera-fps {args.camera_fps:g} 约束）"
+                        f"{exposure_upper:.0f} us"
+                        f"（= {settings.exposure_fps_headroom:g} / camera_fps"
+                        f" {settings.camera_fps:g}）"
                         if exposure_upper
                         else "设备最大值"
                     )
                 )
                 metered = cam.auto_expose(
-                    target=args.brightness,
+                    target=settings.brightness,
+                    tolerance=settings.brightness_tolerance,
                     exposure_upper_us=exposure_upper,
                     verbose=print,
                 )
@@ -170,27 +236,27 @@ def main(argv: list[str] | None = None) -> int:
                     }.get(metered["reason"], metered["reason"])
                     print(
                         f"  警告: 没达到目标灰度（{metered['brightness']:.1f} / 目标 "
-                        f"{args.brightness:g}）：{why}。光线不够，"
-                        f"或者 --camera-fps 太高压住了曝光上限",
+                        f"{settings.brightness:g}）：{why}。光线不够，"
+                        f"或者 camera_fps 太高压住了曝光上限",
                         file=sys.stderr,
                     )
 
-            settings = cam.settings()
-            print("camera: " + ", ".join(f"{k}={v}" for k, v in settings.items()))
+            camera_settings = cam.settings()
+            print("camera: " + ", ".join(f"{k}={v}" for k, v in camera_settings.items()))
             print(
                 f"model : {detector.weights} classes={detector.names} "
                 f"filter={detector.classes} device={detector.device}"
             )
-            print(f"running: detect {args.detect_hz:g} Hz, Ctrl-C 退出")
+            print(f"running: detect {settings.detect_hz:g} Hz, Ctrl-C 退出")
 
             while True:
-                frame = cam.read(timeout_ms=1000)
+                frame = cam.read(timeout_ms=settings.read_timeout_ms)
                 if frame is None:
                     continue
 
                 now = time.monotonic()
                 # 还没到检测时刻：这帧只用来保持取流节奏，不做推理
-                # （注意不能把 due 判断放在 read 之前，否则会先把等到的那一帧丢掉）
+                # （注意不能把这个判断放在 read 之前，否则会先把等到的那一帧丢掉）
                 if now - t_last < min_gap:
                     skipped += 1
                     continue
@@ -210,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
                 last_count = count
 
                 now = time.monotonic()
-                if save_dir and count and now - t_last_save >= 1.0:
+                if save_dir and count and now - t_last_save >= settings.save_min_interval:
                     import cv2
 
                     t_last_save = now
@@ -226,9 +292,9 @@ def main(argv: list[str] | None = None) -> int:
                         f"{pixel_type_name(frame.pixel_type)}"
                     )
 
-                if args.max_frames and processed >= args.max_frames:
+                if settings.max_frames and processed >= settings.max_frames:
                     break
-                if args.duration and now - t_start >= args.duration:
+                if settings.duration and now - t_start >= settings.duration:
                     break
     except KeyboardInterrupt:
         print("\ninterrupted")

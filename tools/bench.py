@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import argparse
 import statistics
+import sys
 import time
 from ctypes import POINTER, c_ubyte
 
 from hik_person.colors import bgr_to_rgb, pixel_type_name
+from hik_person.config import default_config_path, load_settings, resolve_path
 from hik_person.detect import PersonDetector
 from hik_person.mvs import Camera, load_sdk
-
-DEFAULT_WEIGHTS = "models/best.pt"
 
 
 def timed(fn, repeat):
@@ -38,20 +38,36 @@ def report(name: str, samples: list[float]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--serial", default="DA2360141")
-    parser.add_argument("--weights", default=DEFAULT_WEIGHTS)
+    parser.add_argument("--config", default=str(default_config_path()))
+    parser.add_argument("--serial", default=None, help="默认取 config.toml 的 [camera].serial")
+    parser.add_argument("--weights", default=None, help="默认取 config.toml 的 [detector].weights")
     parser.add_argument("--frames", type=int, default=40)
-    parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--device", default="")
-    parser.add_argument("--camera-fps", type=float, default=30.0)
+    parser.add_argument("--imgsz", type=int, default=None)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--camera-fps", type=float, default=None)
     args = parser.parse_args()
 
+    settings, warnings = load_settings(args.config)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+
     sdk = load_sdk()
-    detector = PersonDetector(args.weights, device=args.device or None, imgsz=args.imgsz)
+    detector = PersonDetector(
+        resolve_path(args.weights or settings.weights),
+        device=args.device if args.device is not None else (settings.device or None),
+        imgsz=args.imgsz or settings.imgsz,
+    )
+    camera_fps = args.camera_fps if args.camera_fps is not None else settings.camera_fps
+    serial = args.serial or settings.serial
     print(f"device={detector.device} imgsz={detector.imgsz} frames={args.frames}")
 
-    with Camera(sdk, serial=args.serial) as cam:
-        cam.configure(exposure_us=8000.0, fps=args.camera_fps)
+    with Camera(sdk, serial=serial or None) as cam:
+        cam.configure(
+            exposure_us=settings.exposure_us,
+            gain_db=settings.gain_db,
+            fps=camera_fps,
+            feature_overrides=settings.feature,
+        )
         cam.start()
 
         # 先抓一帧原始缓冲，用来单独量“纯转换”的耗时（不含等帧）
@@ -65,9 +81,7 @@ def main() -> int:
             return 1
         buf, width, height, pixel_type, frame_len = raw
         ptr = buf.ctypes.data_as(POINTER(c_ubyte))
-        print(
-            f"frame={width}x{height} {pixel_type_name(pixel_type)} camera_fps={args.camera_fps:g}"
-        )
+        print(f"frame={width}x{height} {pixel_type_name(pixel_type)} camera_fps={camera_fps:g}")
 
         report(
             "SDK 转 BGR（纯计算, 不含等帧）",

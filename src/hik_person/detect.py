@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""YOLO 人体检测（用训练好的 models/best.pt）。"""
+"""YOLO 人体检测（权重路径来自 config.toml 的 [detector].weights）。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 PERSON_ALIASES = {"person", "people", "pedestrian", "human"}
@@ -44,7 +45,7 @@ class PersonDetector:
         )
 
     def __call__(self, bgr: np.ndarray) -> tuple[list[Detection], np.ndarray]:
-        """输入 BGR uint8（与驱动 bgr8 一致），返回 (检测列表, 画好框的 BGR 图)。"""
+        """输入 BGR uint8，返回 (检测列表, 画好框与人数横幅的 BGR 图)。"""
         result = self.model.predict(
             bgr,
             conf=self.conf,
@@ -65,4 +66,24 @@ class PersonDetector:
                 boxes.xyxy.tolist(), boxes.conf.tolist(), boxes.cls.tolist(), strict=True
             )
         ]
-        return detections, np.ascontiguousarray(result.plot())
+        return detections, _draw_count(result.plot(), len(detections))
+
+
+def _draw_count(bgr: np.ndarray, count: int) -> np.ndarray:
+    """把人数写在画面左上角：截图和存盘 JPEG 也能直接看到人数。
+
+    返回新数组，不改调用方传进来的那张。
+    """
+    annotated = np.ascontiguousarray(bgr).copy()
+    cv2.rectangle(annotated, (0, 0), (330, 56), (0, 0, 0), -1)
+    cv2.putText(
+        annotated,
+        f"person: {count}",
+        (16, 42),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.3,
+        (0, 255, 0) if count else (150, 150, 150),
+        2,
+        cv2.LINE_AA,
+    )
+    return annotated

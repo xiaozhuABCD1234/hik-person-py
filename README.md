@@ -1,115 +1,155 @@
 # hik-person-py
 
 HIKROBOT（海康）工业相机 → YOLO 人体检测 → [Rerun](https://rerun.io) 可视化。
-取流直接用 MVS SDK，不需要相机厂商以外的任何中间件。
+取流直接用 MVS SDK。
+
+**参数都在 [`config.toml`](config.toml) 里，代码里不写死。** 命令行只做临时覆盖。
 
 ## 快速开始
 
 ```bash
-uv sync                                  # torch/cv2 命中 uv 缓存，只下载 rerun-sdk
+uv sync                              # torch/cv2 命中 uv 缓存，只下载 rerun-sdk
 
-uv run hik-person --list                 # 枚举相机
-uv run hik-person --duration 30          # 开 rerun 窗口跑 30 秒
-uv run hik-person --no-rerun --max-frames 300 --save-dir ~/Pictures/hik-person
-uv run python -m hik_person --device cpu --imgsz 480   # 也支持 -m 形式
-uv run hik-person --rerun-save /tmp/hik.rrd --max-frames 100   # 不弹窗口，落盘
-rerun /tmp/hik.rrd                                    # 事后回放
+uv run hik-person --list             # 枚举相机
+uv run hik-person --show-config      # 打印合并后的生效参数
+uv run hik-person                    # 按 config.toml 跑（开 rerun 窗口）
+uv run hik-person --duration 30      # 临时覆盖某一项
+uv run hik-person --no-rerun --rerun-save out.rrd --max-frames 300
 ```
 
-`--device` 留空时自动选择：有 CUDA 用 `cuda:0`，否则 `cpu`。
-`--list` 会把虚拟相机一起列出来（本机是 `[1] ... sn=Vir62953321`），
-用 `--serial` 选物理那台。
+## 参数文件
 
-注意：弹窗模式（默认）下 rerun viewer 是另一个进程，会继承当前终端；
-在脚本/管道里跑就用 `--rerun-save` 落盘，别让 viewer 把 stdout 占住。
+优先级：**命令行 > `config.toml` > 代码里的兜底默认值**。用 `--config PATH` 换文件。
 
-`--rerun-save` 每帧会写两张 1440×1080 的图，实测约 **8.5 MB/帧**（50 帧 ≈ 424 MB），
-15 Hz 就是 128 MB/s。长跑别这么干：用 `--no-rerun --save-dir` 只留检测到人的帧，
-或者只跑短时录制。弹窗模式受 viewer 的 `--memory-limit` 约束，不会无限涨。
+```toml
+[camera]
+serial = "DB1505178"          # 本机 MV-CB016-10UC-S
+camera_fps = 30.0             # 采集帧率上限
+brightness = 110.0            # 测光目标灰度；0 = 关测光
+exposure_us = 8000.0          # 测光起始值；0 = 用设备当前值
+gain_db = -1.0                # -1 = 用设备当前值（0 dB 是合法最小值）
+feature = ["ADCBitDepth=Bits_8"]   # 任意 GenICam 特性
 
-## 运行参数
+[detector]
+weights = "models/best.pt"    # 相对路径按项目根解析
+conf = 0.35
+imgsz = 640
 
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `--serial` | `DA2360141` | 相机序列号 |
-| `--index` | 0 | 没有 `--serial` 时按枚举序号选 |
-| `--weights` | `models/best.pt` | YOLO 权重 |
-| `--conf` / `--iou` / `--imgsz` | 0.35 / 0.50 / 640 | 检测参数 |
-| `--device` | 自动 | `''` / `cuda:0` / `cpu` |
-| `--detect-hz` | 15 | 推理与可视化频率；多余的帧只取流不推理 |
-| `--camera-fps` | 15 | 相机帧率上限，0 = 保持设备设置（该机型上限 249 fps） |
-| `--brightness` | 110 | 测光目标（平均灰度 0-255）。0 = 关闭测光，按下面的值直接用 |
-| `--exposure-us` | 8000 | 曝光 us。0 = 用设备当前值；测光开启时作为起始值 |
-| `--gain-db` | -1 | 增益 dB（该机型 0~17）。**0 是合法值**；-1 = 用设备当前值 |
-| `--no-rerun` | – | 不开 rerun，只在终端打印结果 |
-| `--rerun-save` | – | 把记录写成 `.rrd` 而不弹窗口（无桌面 / 留证据） |
-| `--save-dir` | – | 检测到人时保存标注图（最多 1 张/秒） |
-| `--duration` / `--max-frames` | 0 | 跑够时长/帧数后退出，0 = 不限 |
+[run]
+detect_hz = 15.0
+save_dir = ""
+
+[rerun]
+enabled = true
+save = ""                     # 非空则写 .rrd 且不弹窗口
+```
+
+写错的键名**会警告**而不是被静默忽略（参数文件最怕"改了没生效还不知道"）：
+
+```
+$ uv run hik-person --config /tmp/typo.toml --show-config
+warning: [camera].camera_fps 不合法（需要数字，收到 'fast'），已忽略
+warning: 未知配置项 [camera].serail，已忽略
+warning: 未知配置项 [rerun].enable，已忽略
+```
+
+命令行覆盖（`--help` 有全部）：`--serial --index --camera-fps --exposure-us --gain-db
+--brightness --brightness-tolerance --exposure-fps-headroom --read-timeout-ms --feature
+--weights --conf --iou --imgsz --device --detect-hz --duration --max-frames --save-dir
+--rerun/--no-rerun --rerun-save`。收到命令行没给的项一律保留配置文件/兜底值，所以
+`--gain-db 0` 和"没给增益"是两件事。
+
+## 相机
+
+`--list` 会列出全部设备；`--index` 只在**物理**相机里数，虚拟相机不占号：
+
+```
+[0] usb   MV-CS016-10UC    sn=DA2360141
+[1] usb   MV-CB016-10UC-S  sn=DB1505178
+[2] usb   MV-CS016-10UC    sn=Vir62953321  (虚拟, 打不开)
+```
+
+`--feature NAME=VALUE` 可以写任意 GenICam 特性（可重复），按值的形态自动挑写入方式
+（布尔/整型/浮点/枚举），全失败时把每种尝试的错误码一起报出来：
+
+```bash
+uv run hik-person --feature ADCBitDepth=Bits_8 --camera-fps 249 --brightness 0
+```
+
+这台 **MV-CB016-10UC-S** 的实测 A/B（同一台、同一组其它参数，只换这一项）：
+
+| `ADCBitDepth` | `resulting_fps` |
+|---|---|
+| `Bits_8` | **248.89** |
+| `Bits_12` | **165.37** |
+
+也就是 1440×1080 USB3 想跑到 249 fps 必须走 8 bit 读数；`Bits_12` 会卡在 165.4。
+`Bits_8` 不改变载荷（BayerRG8 本来就是 8 bit/像素），代价是动态范围。
 
 ## 曝光与增益（测光）
 
-默认会先做一次**闭环测光**：自己量画面平均灰度，自己调曝光和增益。
+默认先做一次**闭环测光**：量画面平均灰度，自己调曝光和增益。
 
-为什么不用相机的 `ExposureAuto`：这台 MV-CS016-10UC **没有 `Brightness`（目标灰度）特性**
-（探测过，取不到），相机的自动曝光无法指定目标值，只能用它的内部目标。
-
-策略是**先加曝光，曝光顶到上限后再用增益补**（增益涨噪声，曝光不涨）：
+为什么不用相机的 `ExposureAuto`：这台相机**没有 `Brightness`（目标灰度）特性**，
+相机的自动曝光无法指定目标值。所以策略是**先动曝光，曝光顶到上限后再用增益补**
+（增益涨噪声，曝光不涨）：
 
 ```
-测光: 目标灰度 110，曝光上限 60000 us（受 --camera-fps 15 约束）
-  测光  1: 曝光   8000.0 us  增益  0.00 dB  ->  灰度    4.4  (目标 110)
-  测光  2: 曝光  60000.0 us  增益 10.38 dB  ->  灰度  119.3  (目标 110)
-  -> 曝光 60000 us，增益 10.38 dB，灰度 119.3
+测光: 目标灰度 110，曝光上限 30000 us（= 0.9 / camera_fps 30）
+  测光  1: 曝光   8000.0 us  增益 16.98 dB  ->  灰度  172.9  (目标 110)
+  测光  2: 曝光   5089.3 us  增益 16.98 dB  ->  灰度  138.6  (目标 110)
+  测光  3: 曝光   4040.4 us  增益 16.98 dB  ->  灰度  118.8  (目标 110)
+  -> 曝光 4040 us，增益 16.98 dB，灰度 118.8
 ```
 
-几个要点：
-
-* **曝光上限与帧率绑定**：`上限 = 0.9 / --camera-fps`（`--camera-fps 15` → 60 ms），
-  所以调曝光不会偷偷把帧率带下去。想要高帧率就拿亮度换：
-  `--camera-fps 249` → 上限 3614 us，此时增益顶到 16.98 dB 也可能不够，程序会如实警告
-  并停下（不会白跑迭代）：
-
+* **曝光上限与帧率绑定**：`exposure_fps_headroom / camera_fps`，所以调亮不会偷偷把帧率带下去。
+  要高帧率就得拿亮度换，程序会如实警告并停止，而不是假装成功：
   ```
   警告: 没达到目标灰度（14.6 / 目标 110）：曝光与增益都已到边界。光线不够，
-        或者 --camera-fps 太高压住了曝光上限
+        或者 camera_fps 太高压住了曝光上限
   ```
-
-* 想自己上手动值就 `--brightness 0 --exposure-us 5000 --gain-db 8`。
-* **相机会记住上次的曝光/增益**（MVS 存在相机里，不随进程退出丢），
-  所以“起始值”取决于上一轮跑成什么样；要干净复现就显式传 `--gain-db 0`。
-* 目标灰度 110 是针对这个暗场景的默认值；光线正常时测光通常 1~2 次迭代就收敛。
-
-已知限制：这台相机出厂 `ADCBitDepth=Bits_12`，实测请求 249 fps 只能得到 165.4 fps
-（8 bit 读数才能到 249）。本项目还没暴露 BitDepth 这类通用特性改写，需要时可以加。
+* 想自己上手动值就 `brightness = 0` + `exposure_us` / `gain_db`。
+* **相机会记住上次的曝光/增益**（存在相机里，不随进程退出丢），所以"起始值"取决于上一轮
+  跑成什么样；要干净复现就显式给值。
 
 ## 颜色链路
 
-相机原生输出 `BayerRG8`（1440x1080）。本包所有帧在内部统一是 **BGR** 顺序
-（OpenCV 的默认顺序），靠两条约定保证不串色：
+相机原生输出 `BayerRG8`。本包内部统一是 **BGR**（OpenCV 的默认顺序），靠两条约定保证不串色：
 
-1. **转换交给 SDK**。`MV_CC_SetBayerCvtQuality(1)` 配高质量插值，
-   再用 `MV_CC_ConvertPixelTypeEx` 转到 `PixelType_Gvsp_BGR8_Packed`（= 35127317）。
-   走 SDK 就不会碰到 Bayer 排布的命名歧义。
-2. **若要自己解 Bayer，注意命名差一个像素**。MVS/GenICam 对 Bayer 排布的命名与
-   OpenCV 相差一个像素：MVS 的 `BayerRG8` 必须用 `cv2.COLOR_BayerBG2BGR`。
-   以 SDK 输出为参考，两者几乎是同一个东西（BayerBG 与它的 corr 0.998，
-   而 BayerRG 把 R/B 对调，corr 0.988）。
+1. **转换交给 SDK**：`MV_CC_SetBayerCvtQuality(1)` 配高质量插值，再用
+   `MV_CC_ConvertPixelTypeEx` 转到 `PixelType_Gvsp_BGR8_Packed`（= 35127317）。走 SDK
+   就不会碰到 Bayer 排布的命名歧义。
+2. **进 rerun 前换一次 RGB**：`rr.Image` 把三通道数据按 RGB 解读，直接把 BGR 喂进去就会
+   红蓝互换，见 `colors.bgr_to_rgb()`。
 
-   ⚠️ 这个实测的**区分度取决于画面里的颜色**：对着几乎中性灰的场景，R/B 互换在
-   通道均值上只差 0.03（104.93 ↔ 104.96），光看均值看不出来。
-   结论性最强的是单元测试里那张合成马赛克（R=200 / G=50 / B=100，分得开，
-   见 `tests/test_colors.py`）；`tools/check_colors.py` 只是现场 sanity check，
-   对着彩色物体或白纸上的红物体会明显得多。
-
-3. **进 rerun 前换一次 RGB**。`rr.Image` 把三通道数据按 RGB 解读，
-   直接把 BGR 喂进去就会红蓝互换，见 `colors.bgr_to_rgb()`。
+如果要自己解 Bayer，注意 MVS/GenICam 对 Bayer 排布的命名与 OpenCV **相差一个像素**：
+MVS 的 `BayerRG8` 必须用 `cv2.COLOR_BayerBG2BGR`（用 `COLOR_BayerRG2BGR` 会把 R/B 对调，
+以 SDK 输出为参考：BG 的 corr 0.998，RG 0.988）。这个判据的区分度取决于画面里的颜色 ——
+对着几乎中性灰的场景，R/B 互换在通道均值上只差 0.03；结论性最强的是单元测试里那张合成
+马赛克（R=200 / G=50 / B=100）。
 
 验证：
 
 ```bash
 uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
-# 打印三条路径的 B/G/R 均值与相关系数，并存 3 张图供肉眼确认
 ```
+
+## 可视化（rerun）
+
+布局由 blueprint 显式指定，不依赖 rerun 的自动推断：
+
+| 实体 | 内容 |
+|---|---|
+| `camera/annotated` | 标注图：检测框 + 左上角人数横幅 |
+| `camera/annotated/boxes` | 同一批框的 `Boxes2D`，可悬停看标签与置信度 |
+| `person/count` | 人数曲线（右侧 TimeSeriesView） |
+| `person/events` | 人数变化日志（带各框置信度） |
+
+* 弹窗模式下 viewer 是**独立进程**，会继承当前终端；在脚本/管道里跑就用 `--rerun-save`，
+  别让 viewer 把 stdout 占住。
+* `--rerun-save` 每帧写一张 1440×1080 的图，实测约 **8.5 MB/帧**（15 Hz 就是 128 MB/s）。
+  长跑别这么干：用 `--no-rerun --save-dir` 只留检测到人的帧（最多 1 张/秒，见
+  `save_min_interval`）。
 
 ## 不需要任何 .sh
 
@@ -124,31 +164,35 @@ MVS SDK 的像素转换 / GenICam producer 库是 `dlopen` 时才加载的，而
 ```bash
 uv run ruff check .            # lint
 uv run ruff format --check .   # 格式
-uv run pytest                  # 单元测试，不需要相机
-uv run python tools/bench.py   # 分环节计时（取流 / 转换 / 推理）
+uv run pytest                  # 54 个单元测试，都不需要相机
+uv run python tools/bench.py   # 分环节计时（等帧 / 转换 / 推理）
 ```
 
-本机 `PYTHONPATH` 里还带着别的项目的 `site-packages`（`~/.bashrc` 里 source 了
-ROS 的 setup），pytest 会自动加载那些插件并在收集阶段崩掉。`pyproject.toml` 里用
-`-p no:launch_testing -p no:launch_ros` 显式禁掉了它们；`-p no:<name>` 对不存在的
-插件是空操作，所以在别的机器上也无害。更彻底的做法是 `PYTHONPATH= uv run pytest`。
+工具（`tools/*.py`）同样读 `config.toml`，也可以 `--config PATH` 指别的文件。
+
+本机 `PYTHONPATH` 里还带着别的项目的 `site-packages`（`~/.bashrc` 里 source 了 ROS 的
+setup），pytest 会自动加载那些插件并在收集阶段崩掉。`pyproject.toml` 里用
+`-p no:launch_testing -p no:launch_ros` 显式禁掉了它们；`-p no:<name>` 对不存在的插件
+是空操作，所以在别的机器上也无害。更彻底的做法是 `PYTHONPATH= uv run pytest`。
 
 ## 结构
 
 ```
+config.toml              所有参数都在这里
 src/hik_person/
-├── colors.py   像素格式映射 + Bayer/BGR/RGB 转换
-├── mvs.py      MVS 运行时环境、枚举、取流、SDK 内 BGR 转换
-├── detect.py   ultralytics YOLO 人体检测
-├── viz.py      rerun 记录（Image / Boxes2D / Scalars / TextLog）
-└── __main__.py CLI 与主循环
+├── config.py    config.toml 读取 / 命令行覆盖 / 路径解析
+├── colors.py    像素格式映射 + Bayer/BGR/RGB 转换
+├── mvs.py       MVS 运行时环境、枚举、取流、测光、特性改写
+├── detect.py    ultralytics YOLO 人体检测（含人数横幅）
+├── viz.py       rerun 记录与布局（Image / Boxes2D / Scalars / TextLog）
+└── __main__.py  CLI，只负责把参数接起来
 tools/
 ├── check_colors.py  颜色链路对比验证
 └── bench.py         分环节计时
 models/best.pt       训练好的权重
 ```
 
-## 实测性能（MV-CS016-10UC 1440x1080 + RTX 4060 Laptop）
+## 实测性能（1440×1080 + RTX 4060 Laptop）
 
 `uv run python tools/bench.py` 可复现：
 
@@ -159,12 +203,25 @@ models/best.pt       训练好的权重
 | YOLO 推理（`imgsz 640`, `cuda:0`） | 4.3 ms |
 | 取一帧（含等帧） | 33 ms = 相机帧间隔 |
 
-单帧计算总共约 5.5 ms，所以瓶颈在相机节拍，不在模型。主循环按 `--detect-hz` 限速，
-并且只处理最新的帧（不会积压）：相机开到 249 fps 也只按 15 Hz 推理。
+单帧计算约 5.5 ms，瓶颈在相机节拍，不在模型。主循环按 `detect_hz` 限速，且只处理最新的
+帧（不积压）：相机开到 249 fps 也只按 15 Hz 推理。
 
-`--camera-fps` 建议取 `--detect-hz` 的 2 倍以上，例如 `--camera-fps 30 --detect-hz 15`
-（实测约 13 fps 稳定、每两帧推理一次）。两者相等时帧到达时刻正好压在周期边界上，
-代码里留了 10% 容差来避开这个抖动。
+`camera_fps` 建议取 `detect_hz` 的 2 倍以上（例如 30 / 15，实测端到端 13~14 fps、每两帧
+推理一次）。两者相等时帧到达时刻正好压在周期边界上，所以留了 `rate_tolerance` 容差。
+
+## 故障排查
+
+* `MV_CC_OpenDevice failed: 0x80000203` —— 相机被别的进程占用（MVS 对 USB3 不强制互斥）：
+  关掉 MVS 客户端，或停掉另一个正在取流的进程。
+* 枚举不到设备 —— 检查 USB3 线缆，以及 `/opt/MVS` 驱动与权限。
+* 画面偏暗 / 检测不出人 —— 看测光输出：报"曝光与增益都已到边界"就是现场光线不够，或者
+  `camera_fps` 定得太高压住了曝光上限；把 `camera_fps` 调低再跑，或把 `brightness` 降到
+  这个场景能达到的值。
+* 颜色不对（红蓝互换）—— 检查是否绕过了 `colors.bgr_to_rgb()`。快速自检：对着明显偏红的
+  物体比较 `frame.bgr[..., 2].mean()`（R）与 `frame.bgr[..., 0].mean()`（B），R 应更大。
+* 改了 `config.toml` 好像没生效 —— 先 `--show-config` 看合并后的值，再确认写到正确的段里
+  （键名写错会有 warning）。
+* rerun 窗口没起来 —— 加 `--no-rerun` 先确认取流与检测本身正常。
 
 ## 许可证
 
@@ -175,17 +232,3 @@ AGPL-3.0-or-later，全文见 [LICENSE](LICENSE)。
 - `models/best.pt` 为本项目使用的检测权重，随本仓库一同提供。
 - 运行需要海康 **MVS SDK**（`/opt/MVS`）。它是海康的专有软件，不在本仓库内，
   也不由本许可证覆盖；使用它需遵守海康自己的许可条款。
-
-## 故障排查
-
-* `MV_CC_OpenDevice failed` —— 相机被别的进程占用（MVS 对 USB3 不强制互斥）：
-  关掉 MVS 客户端，或停掉另一个正在取流的进程。
-* 枚举不到设备 —— 检查 USB3 线缆，以及 `/opt/MVS` 驱动与权限。
-* 颜色不对（红蓝互换）—— 检查是否绕过了 `colors.bgr_to_rgb()`。
-  快速自检：对着明显偏红的物体比较 `frame.bgr[..., 2].mean()`（R）与
-  `frame.bgr[..., 0].mean()`（B），R 应更大。
-* rerun 窗口没起来 —— 加 `--no-rerun` 先确认取流与检测本身正常。
-* 画面偏暗 / 检测不出人 —— 看测光输出：如果报了“曝光与增益都已到边界”，就是现场光线不够，
-  或 `--camera-fps` 定得太高压住了曝光上限；把 `--camera-fps` 降低（例如 15）再跑，
-  或把 `--brightness` 调低到这个场景能达到的值。
-* `MV_CC_OpenDevice failed: 0x80000203` —— 相机已被占用（例如上一次运行还在、或开了 MVS 客户端）。

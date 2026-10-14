@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+from collections.abc import Iterable, Sequence
 from ctypes import POINTER, byref, c_ubyte, cast, memset, sizeof
 from dataclasses import dataclass, field
 
@@ -123,6 +124,11 @@ class Device:
     layer: str
     info: object = field(repr=False, default=None)
 
+    @property
+    def virtual(self) -> bool:
+        """MVS 虚拟相机的序列号是 ``Vir`` 开头（实测 Vir62953321）。"""
+        return self.serial.startswith("Vir")
+
 
 @dataclass
 class Frame:
@@ -202,6 +208,51 @@ def next_exposure_step(
     return exposure_min_us, _clamp(gain, gain_min_db, gain_max_db)
 
 
+def parse_feature_spec(spec: str) -> tuple[str, str]:
+    """把 ``--feature NAME=VALUE`` 解析成 ``(NAME, VALUE)``。"""
+    name, sep, value = spec.partition("=")
+    name, value = name.strip(), value.strip()
+    if not sep or not name or not value:
+        raise ValueError(f"特性写法应为 NAME=VALUE，收到 {spec!r}")
+    return name, value
+
+
+def feature_setter_order(value: str) -> tuple[str, ...]:
+    """按值的形态决定先试哪种 setter。
+
+    SDK 没有“查特性类型”的接口，而 GenICam 特性分枚举/整型/浮点/布尔四种，
+    写错类型会直接报错，所以按值的形态排队试，并把失败码收集起来一次性报出。
+    纯函数，便于单测。
+    """
+    text = value.strip().lower()
+    if text in ("true", "false"):
+        return ("bool", "int", "enum")
+    try:
+        int(text)
+    except ValueError:
+        pass
+    else:
+        return ("int", "enum_int", "float")
+    try:
+        float(text)
+    except ValueError:
+        return ("enum",)
+    return ("float", "enum_int")
+
+
+def _feature_setters() -> dict:
+    """kind -> (调用的 SDK 方法, 把字符串值转成参数)。"""
+    return {
+        "bool": lambda cam, name, value: cam.MV_CC_SetBoolValue(
+            name, value.strip().lower() == "true"
+        ),
+        "int": lambda cam, name, value: cam.MV_CC_SetIntValue(name, int(value)),
+        "float": lambda cam, name, value: cam.MV_CC_SetFloatValue(name, float(value)),
+        "enum": lambda cam, name, value: cam.MV_CC_SetEnumValueByString(name, value),
+        "enum_int": lambda cam, name, value: cam.MV_CC_SetEnumValue(name, int(value)),
+    }
+
+
 class Camera:
     """最小可用的 MVS 取流封装。"""
 
@@ -212,6 +263,7 @@ class Camera:
         self.cam = None
         self.device: Device | None = None
         self.notes: list[str] = []
+        self.applied_features: list[str] = []
         self._dst = None
         self._param = None
 
@@ -222,6 +274,12 @@ class Camera:
         devices = list_devices(sdk)
         if not devices:
             raise MvsError("没有枚举到设备；检查 USB3 连接与 MVS 驱动")
+        physical = [d for d in devices if not d.virtual]
+        if not physical:
+            raise MvsError(
+                "只枚举到 MVS 虚拟相机（序列号 Vir 开头），没有物理相机；"
+                "虚拟相机在 Linux 上打不开（MV_E_ACCESS_DENIED）"
+            )
 
         if self.serial:
             match = [d for d in devices if d.serial == self.serial]
@@ -232,7 +290,8 @@ class Camera:
                 )
             self.device = match[0]
         else:
-            self.device = devices[self.index]
+            # --index 只在物理相机里数，虚拟相机不占号
+            self.device = physical[self.index]
 
         self.cam = sdk.MvCamera()
         ret = self.cam.MV_CC_CreateHandle(self.device.info)
@@ -273,9 +332,17 @@ class Camera:
         bayer_quality: int = 1,
         grab_strategy: str = "LatestImagesOnly",
         buffer_count: int = 3,
+        feature_overrides: Sequence[str] = (),
     ) -> dict:
+        """按固定顺序配置相机；越靠后写入的越优先（显式参数压过通用特性改写）。
+
+        顺序：关自动曝光/增益 -> 触发 -> Bayer 质量 -> 取流策略/缓冲
+              -> feature_overrides -> 曝光/增益 -> 帧率
+        帧率放最后：改 ADCBitDepth 之类的特性会把 AcquisitionFrameRate 重置掉。
+        """
         sdk, cam = self.sdk, self.cam
         self.notes = []
+        self.applied_features = []
 
         def hard(ret, what):
             if ret != 0:
@@ -293,27 +360,11 @@ class Camera:
             )
         if gain_auto:
             hard(cam.MV_CC_SetEnumValueByString("GainAuto", gain_auto), "GainAuto")
-        # 曝光/增益：<=0 与 <0 分别表示“保持设备值”。增益的 0 dB 是合法值（最小值），
-        # 所以它不能用 0 当哨兵值。
-        if exposure_us > 0:
-            hard(cam.MV_CC_SetFloatValue("ExposureTime", exposure_us), "ExposureTime")
-        if gain_db >= 0:
-            hard(cam.MV_CC_SetFloatValue("Gain", gain_db), "Gain")
 
         # 自由运行
         hard(cam.MV_CC_SetEnumValue("TriggerMode", sdk.MV_TRIGGER_MODE_OFF), "TriggerMode")
 
-        if fps > 0:
-            hard(
-                cam.MV_CC_SetBoolValue("AcquisitionFrameRateEnable", True),
-                "AcquisitionFrameRateEnable",
-            )
-            hard(
-                cam.MV_CC_SetFloatValue("AcquisitionFrameRate", fps),
-                "AcquisitionFrameRate",
-            )
-
-        # Bayer 插值质量 = 驱动的 bayer_conversion_quality: 1
+        # Bayer 插值质量
         hard(cam.MV_CC_SetBayerCvtQuality(bayer_quality), "MV_CC_SetBayerCvtQuality")
 
         # 取流策略/缓冲是性能提示，失败只记录
@@ -328,6 +379,27 @@ class Camera:
             f"SetGrabStrategy({grab_strategy})",
         )
         soft(cam.MV_CC_SetImageNodeNum(buffer_count), "SetImageNodeNum")
+
+        # 通用特性改写（例如 --feature ADCBitDepth=Bits_8）
+        self.applied_features = self.apply_features(feature_overrides)
+
+        # 曝光/增益：<=0 与 <0 分别表示“保持设备值”。增益的 0 dB 是合法值（最小值），
+        # 所以它不能用 0 当哨兵值。
+        if exposure_us > 0:
+            hard(cam.MV_CC_SetFloatValue("ExposureTime", exposure_us), "ExposureTime")
+        if gain_db >= 0:
+            hard(cam.MV_CC_SetFloatValue("Gain", gain_db), "Gain")
+
+        # 帧率最后写：上面的特性改写可能把 AcquisitionFrameRate 重置掉
+        if fps > 0:
+            hard(
+                cam.MV_CC_SetBoolValue("AcquisitionFrameRateEnable", True),
+                "AcquisitionFrameRateEnable",
+            )
+            hard(
+                cam.MV_CC_SetFloatValue("AcquisitionFrameRate", fps),
+                "AcquisitionFrameRate",
+            )
 
         return self.settings()
 
@@ -349,6 +421,33 @@ class Camera:
         if self.cam.MV_CC_GetFloatValue(key, st) != 0:
             return float("nan")
         return float(st.fCurValue)
+
+    # --------------------------------------------------------- 通用特性改写
+    def set_feature(self, name: str, value: str) -> str:
+        """按名字写一个 GenICam 特性；返回实际生效的写入方式。
+
+        全失败时把每种尝试的错误码一起报出来，而不是只说“失败”。
+        """
+        attempts = []
+        setters = _feature_setters()
+        for kind in feature_setter_order(value):
+            ret = setters[kind](self.cam, name, value)
+            if ret == 0:
+                return kind
+            attempts.append(f"{kind}=0x{ret & 0xFFFFFFFF:08x}")
+        raise MvsError(
+            f"设置特性 {name}={value} 失败（按 {', '.join(attempts)} 依次试过）："
+            f"检查特性名拼写，或该特性是否需要先满足别的条件（如先关自动模式）"
+        )
+
+    def apply_features(self, specs: Iterable[str]) -> list[str]:
+        """批量应用 ``NAME=VALUE``；返回可打印的摘要。"""
+        applied = []
+        for spec in specs:
+            name, value = parse_feature_spec(spec)
+            kind = self.set_feature(name, value)
+            applied.append(f"{name}={value} (以 {kind} 写入)")
+        return applied
 
     def settings(self) -> dict:
         pixel_type = self._enum_cur("PixelFormat")
@@ -403,8 +502,8 @@ class Camera:
     def auto_expose(
         self,
         *,
-        target: float = 110.0,
-        tolerance: float = 12.0,
+        target: float,
+        tolerance: float,
         exposure_upper_us: float | None = None,
         gain_max_db: float | None = None,
         max_iters: int = 10,
