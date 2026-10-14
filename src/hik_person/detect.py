@@ -6,8 +6,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import cv2
 import numpy as np
+
+from .annotate import draw_count_banner
 
 PERSON_ALIASES = {"person", "people", "pedestrian", "human"}
 
@@ -66,24 +67,4 @@ class PersonDetector:
                 boxes.xyxy.tolist(), boxes.conf.tolist(), boxes.cls.tolist(), strict=True
             )
         ]
-        return detections, _draw_count(result.plot(), len(detections))
-
-
-def _draw_count(bgr: np.ndarray, count: int) -> np.ndarray:
-    """把人数写在画面左上角：截图和存盘 JPEG 也能直接看到人数。
-
-    返回新数组，不改调用方传进来的那张。
-    """
-    annotated = np.ascontiguousarray(bgr).copy()
-    cv2.rectangle(annotated, (0, 0), (330, 56), (0, 0, 0), -1)
-    cv2.putText(
-        annotated,
-        f"person: {count}",
-        (16, 42),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.3,
-        (0, 255, 0) if count else (150, 150, 150),
-        2,
-        cv2.LINE_AA,
-    )
-    return annotated
+        return detections, draw_count_banner(result.plot(), len(detections))

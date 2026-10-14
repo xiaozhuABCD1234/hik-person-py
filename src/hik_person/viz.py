@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""rerun 可视化：检测框 + 人数。
+"""rerun 可视化：检测框 + 人数（姿态任务再加关键点与骨架）。
 
 记录到这些实体：
 
-===========================  ==========================================
-``camera/annotated``         标注图（框 + 人数横幅，由 detect.py 画好）
-``camera/annotated/boxes``   同一批框的 Boxes2D（可悬停看标签与置信度）
-``person/count``             人数（TimeSeriesView 里的曲线）
-``person/events``            人数变化日志（带各框置信度）
-===========================  ==========================================
+==================================  ========================================
+``camera/annotated``                标注图（框/骨架/人数横幅）
+``camera/annotated/boxes``          框的 Boxes2D（可悬停看标签与置信度）
+``camera/annotated/keypoints``      姿态关键点（带名称）
+``camera/annotated/skeleton``       骨架连线
+``person/count``                    人数（TimeSeriesView 里的曲线）
+``person/events``                   人数变化日志（带各框置信度）
+==================================  ========================================
 
 布局由 blueprint 显式指定（左边标注图、右边人数曲线），不依赖 rerun 的自动推断。
 
@@ -20,8 +22,11 @@ from __future__ import annotations
 import numpy as np
 
 from .colors import bgr_to_rgb
+from .pose import bones, visible_keypoints
 
 BOX_COLOR = (90, 220, 120)  # RGB
+KPT_COLOR = (255, 180, 60)
+SKELETON_COLOR = (120, 180, 255)
 
 
 def _blueprint_module():
@@ -41,11 +46,13 @@ class RerunView:
         *,
         spawn: bool = True,
         save_path: str | None = None,
+        kpt_conf: float = 0.5,
     ):
         """spawn=True 弹 viewer；save_path 则把记录写成 .rrd（不弹窗口）。"""
         import rerun as rr
 
         self.rr = rr
+        self.kpt_conf = kpt_conf
         self._last_count: int | None = None  # None = 还没记录过人数
         rr.init(app_id, spawn=spawn)
         if save_path:
@@ -76,35 +83,39 @@ class RerunView:
         else:  # pragma: no cover - 老版本
             rr.set_time_sequence("frame", frame_number)
 
-    def log_frame(self, frame, detections, annotated_bgr) -> None:
+    def log_frame(self, frame, annotated_bgr, *, detections=(), poses=()) -> None:
+        """记一帧；detect 任务传 detections，pose 任务传 poses。"""
         rr = self.rr
         self._set_time(frame.frame_number)
 
         rr.log("camera/annotated", rr.Image(bgr_to_rgb(annotated_bgr)))
-        self._log_boxes(detections)
+        instances = [*detections, *poses]
+        self._log_boxes(instances)
+        if poses:
+            self._log_poses(poses)
 
+        count = len(instances)
         scalar = getattr(rr, "Scalars", None) or rr.Scalar
-        rr.log("person/count", scalar(len(detections)))
+        rr.log("person/count", scalar(count))
 
-        count = len(detections)
         if count != self._last_count:
             self._last_count = count
             rr.log(
                 "person/events",
                 rr.TextLog(
-                    f"{count} person(s): " + ", ".join(f"conf={d.conf:.2f}" for d in detections)
+                    f"{count} person(s): " + ", ".join(f"conf={d.conf:.2f}" for d in instances)
                 ),
             )
 
-    def _log_boxes(self, detections) -> None:
+    def _log_boxes(self, instances) -> None:
         rr = self.rr
         cls = getattr(rr, "Boxes2D", None) or rr.Box2D  # 0.14 叫 Box2D
         # 图像在 camera/annotated，框挂到它的子路径上就会叠加显示
-        if not detections:
+        if not instances:
             empty = np.zeros((0, 2), dtype=np.float32)
             rr.log("camera/annotated/boxes", cls(centers=empty, sizes=empty))
             return
-        xyxy = np.array([d.xyxy for d in detections], dtype=np.float32)
+        xyxy = np.array([d.xyxy for d in instances], dtype=np.float32)
         centers = np.stack(
             [(xyxy[:, 0] + xyxy[:, 2]) * 0.5, (xyxy[:, 1] + xyxy[:, 3]) * 0.5], axis=1
         )
@@ -114,7 +125,33 @@ class RerunView:
             cls(
                 centers=centers,
                 sizes=sizes,
-                labels=[f"{d.label} {d.conf:.2f}" for d in detections],
-                colors=[BOX_COLOR] * len(detections),
+                labels=[f"{getattr(d, 'label', 'person')} {d.conf:.2f}" for d in instances],
+                colors=[BOX_COLOR] * len(instances),
             ),
         )
+
+    def _log_poses(self, poses) -> None:
+        """关键点用 Points2D（带名字），骨头用 LineStrips2D。"""
+        rr = self.rr
+        points: list[np.ndarray] = []
+        labels: list[str] = []
+        strips: list[np.ndarray] = []
+        for pose in poses:
+            visible, names = visible_keypoints(
+                pose.keypoints, pose.kpt_conf, threshold=self.kpt_conf
+            )
+            if len(visible):
+                points.append(visible)
+                labels.extend(names)
+            strips.extend(bones(pose.keypoints, pose.kpt_conf, threshold=self.kpt_conf))
+
+        rr.log(
+            "camera/annotated/keypoints",
+            rr.Points2D(
+                np.concatenate(points) if points else np.zeros((0, 2), dtype=np.float32),
+                labels=labels,
+                colors=KPT_COLOR,
+                radii=3.0,
+            ),
+        )
+        rr.log("camera/annotated/skeleton", rr.LineStrips2D(strips, colors=SKELETON_COLOR))

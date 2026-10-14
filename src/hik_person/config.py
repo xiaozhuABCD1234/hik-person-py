@@ -17,6 +17,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # src/hik_person/config.py -> 项目根
 DEFAULT_CONFIG_NAME = "config.toml"
+TASKS: tuple[str, ...] = ("detect", "pose")
 
 
 @dataclass
@@ -36,11 +37,13 @@ class Settings:
     feature: list[str] = field(default_factory=list)
 
     # -------------------------------------------------------------- [detector]
+    task: str = "detect"
     weights: str = "models/best.pt"
     conf: float = 0.35
     iou: float = 0.50
     imgsz: int = 640
     device: str = ""
+    kpt_conf: float = 0.5
 
     # ------------------------------------------------------------------- [run]
     detect_hz: float = 15.0
@@ -67,11 +70,13 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("camera", "exposure_fps_headroom"): "exposure_fps_headroom",
     ("camera", "read_timeout_ms"): "read_timeout_ms",
     ("camera", "feature"): "feature",
+    ("detector", "task"): "task",
     ("detector", "weights"): "weights",
     ("detector", "conf"): "conf",
     ("detector", "iou"): "iou",
     ("detector", "imgsz"): "imgsz",
     ("detector", "device"): "device",
+    ("detector", "kpt_conf"): "kpt_conf",
     ("run", "detect_hz"): "detect_hz",
     ("run", "rate_tolerance"): "rate_tolerance",
     ("run", "duration"): "duration",

@@ -18,7 +18,7 @@ import time
 from dataclasses import fields
 
 from .colors import pixel_type_name
-from .config import Settings, apply_cli, default_config_path, load_settings, resolve_path
+from .config import TASKS, Settings, apply_cli, default_config_path, load_settings, resolve_path
 from .mvs import (
     Camera,
     MvsError,
@@ -64,10 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
         "例：--feature ADCBitDepth=Bits_8 解锁 249 fps",
     )
     p.add_argument("--weights", default=None, help="覆盖 [detector].weights")
+    p.add_argument("--task", default=None, choices=TASKS, help="覆盖 [detector].task")
     p.add_argument("--conf", type=float, default=None, help="覆盖 [detector].conf")
     p.add_argument("--iou", type=float, default=None, help="覆盖 [detector].iou")
     p.add_argument("--imgsz", type=int, default=None, help="覆盖 [detector].imgsz")
     p.add_argument("--device", default=None, help="覆盖 [detector].device：''/cuda:0/cpu")
+    p.add_argument("--kpt-conf", type=float, default=None, help="覆盖 [detector].kpt_conf")
     p.add_argument("--detect-hz", type=float, default=None, help="覆盖 [run].detect_hz")
     p.add_argument("--duration", type=float, default=None, help="覆盖 [run].duration")
     p.add_argument("--max-frames", type=int, default=None, help="覆盖 [run].max_frames")
@@ -114,6 +116,13 @@ def main(argv: list[str] | None = None) -> int:
         print_settings(settings, args.config)
         return 0
 
+    if settings.task not in TASKS:
+        print(
+            f"error: [detector].task = {settings.task!r} 不认识，可选 {TASKS}",
+            file=sys.stderr,
+        )
+        return 2
+
     for spec in settings.feature:
         try:
             parse_feature_spec(spec)
@@ -135,9 +144,6 @@ def main(argv: list[str] | None = None) -> int:
         sdk.MvCamera.MV_CC_Finalize()
         return 0
 
-    from .detect import PersonDetector
-
-    # 配置里把 weights 写成空串就用 Settings 里的兜底默认值
     weights_value = settings.weights or Settings().weights
     weights_path = resolve_path(weights_value)
     if not weights_path.is_file():
@@ -147,20 +153,37 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    detector = PersonDetector(
-        weights_path,
-        device=settings.device or None,
-        conf=settings.conf,
-        iou=settings.iou,
-        imgsz=settings.imgsz,
-    )
+    try:
+        if settings.task == "pose":
+            from .pose import PoseEstimator
+
+            estimator = PoseEstimator(
+                weights_path,
+                device=settings.device or None,
+                conf=settings.conf,
+                imgsz=settings.imgsz,
+                kpt_conf=settings.kpt_conf,
+            )
+        else:
+            from .detect import PersonDetector
+
+            estimator = PersonDetector(
+                weights_path,
+                device=settings.device or None,
+                conf=settings.conf,
+                iou=settings.iou,
+                imgsz=settings.imgsz,
+            )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     view = None
     if settings.rerun_enabled:
         from .viz import RerunView
 
         rrd = settings.rerun_save or None
-        view = RerunView(spawn=not rrd, save_path=rrd)
+        view = RerunView(spawn=not rrd, save_path=rrd, kpt_conf=settings.kpt_conf)
         if rrd:
             print(f"rerun 记录 -> {rrd}")
             print(f"  打开方式: rerun {rrd}   （或拖进 rerun viewer）")
@@ -174,9 +197,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"config: {args.config}")
     print(
-        f"run   : detect {settings.detect_hz:g} Hz（相机 {settings.camera_fps:g} fps 上限）, "
-        f"imgsz {settings.imgsz}, conf {settings.conf:g}, "
-        f"brightness {settings.brightness:g}, feature {settings.feature or '[]'}"
+        f"run   : {settings.task}, detect {settings.detect_hz:g} Hz"
+        f"（相机 {settings.camera_fps:g} fps 上限）, imgsz {settings.imgsz}, "
+        f"conf {settings.conf:g}, brightness {settings.brightness:g}, "
+        f"feature {settings.feature or '[]'}"
     )
 
     period = 1.0 / max(settings.detect_hz, 0.1)
@@ -244,10 +268,10 @@ def main(argv: list[str] | None = None) -> int:
             camera_settings = cam.settings()
             print("camera: " + ", ".join(f"{k}={v}" for k, v in camera_settings.items()))
             print(
-                f"model : {detector.weights} classes={detector.names} "
-                f"filter={detector.classes} device={detector.device}"
+                f"model : {estimator.weights} task={settings.task} classes={estimator.names} "
+                f"device={estimator.device}"
             )
-            print(f"running: detect {settings.detect_hz:g} Hz, Ctrl-C 退出")
+            print(f"running: {settings.task} {settings.detect_hz:g} Hz, Ctrl-C 退出")
 
             while True:
                 frame = cam.read(timeout_ms=settings.read_timeout_ms)
@@ -262,16 +286,19 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 t_last = now
 
-                detections, annotated = detector(frame.bgr)
+                instances, annotated = estimator(frame.bgr)
                 processed += 1
-                count = len(detections)
+                count = len(instances)
 
                 if view is not None:
-                    view.log_frame(frame, detections, annotated)
+                    if settings.task == "pose":
+                        view.log_frame(frame, annotated, poses=instances)
+                    else:
+                        view.log_frame(frame, annotated, detections=instances)
                 if count and count != last_count:
                     print(
                         f"[{time.strftime('%H:%M:%S')}] person x{count} "
-                        f"({', '.join(f'{d.conf:.2f}' for d in detections)})"
+                        f"({', '.join(f'{d.conf:.2f}' for d in instances)})"
                     )
                 last_count = count
 

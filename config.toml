@@ -37,6 +37,10 @@ read_timeout_ms = 1000
 feature = ["ADCBitDepth=Bits_8"]
 
 [detector]
+# "detect" = 人体检测框（weights 用自训练模型）；
+# "pose"   = 关键点/骨架（weights 用 YOLO pose，如 models/yolo26n-pose.pt）。
+# 切任务时同时改 task 和 weights 两项。
+task = "detect"
 # 相对路径按项目根解析。
 weights = "models/best.pt"
 conf = 0.35
@@ -44,6 +48,8 @@ iou = 0.50
 imgsz = 640
 # "" = 有 CUDA 用 cuda:0，否则 cpu。
 device = ""
+# 仅 pose：关键点置信度低于它就当没看见（画骨架与 rerun 都受影响）。
+kpt_conf = 0.5
 
 [run]
 # 推理与可视化频率（相机更快时多余帧只取流不推理）。

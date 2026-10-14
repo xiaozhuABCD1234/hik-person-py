@@ -15,6 +15,7 @@ uv run hik-person --show-config      # 打印合并后的生效参数
 uv run hik-person                    # 按 config.toml 跑（开 rerun 窗口）
 uv run hik-person --duration 30      # 临时覆盖某一项
 uv run hik-person --no-rerun --rerun-save out.rrd --max-frames 300
+uv run hik-person --task pose --weights models/yolo26n-pose.pt   # 试姿态估计
 ```
 
 ## 参数文件
@@ -31,9 +32,12 @@ gain_db = -1.0                # -1 = 用设备当前值（0 dB 是合法最小�
 feature = ["ADCBitDepth=Bits_8"]   # 任意 GenICam 特性
 
 [detector]
-weights = "models/best.pt"    # 相对路径按项目根解析
+# detect = 人体检测框；pose = 关键点/骨架（切任务时 weights 也要一起改）
+task = "detect"
+weights = "models/best.pt"    # 相对路径按项目根解析；pose 用 models/yolo26n-pose.pt
 conf = 0.35
 imgsz = 640
+kpt_conf = 0.5                # 仅 pose：关键点置信度阈值
 
 [run]
 detect_hz = 15.0
@@ -85,6 +89,24 @@ uv run hik-person --feature ADCBitDepth=Bits_8 --camera-fps 249 --brightness 0
 
 也就是 1440×1080 USB3 想跑到 249 fps 必须走 8 bit 读数；`Bits_12` 会卡在 165.4。
 `Bits_8` 不改变载荷（BayerRG8 本来就是 8 bit/像素），代价是动态范围。
+
+## 任务：检测框 or 关键点
+
+`[detector].task` 决定跑哪条任务线，两者共用取流、测光、人数统计与 rerun 布局：
+
+| `task` | `weights` | 输出 |
+|---|---|---|
+| `detect`（默认） | `models/best.pt` | 人体检测框 |
+| `pose` | `models/yolo26n-pose.pt` | 检测框 + 17 个 COCO 关键点与骨架 |
+
+```bash
+uv run hik-person --task pose --weights models/yolo26n-pose.pt
+```
+
+姿态线用 ultralytics 的 `yolo26n-pose`（`kpt_shape=[17,3]`，单类 person）。骨架表在
+`pose.SKELETON_17`（19 根骨头，0-based）——注意 ultralytics 自己的 skeleton 是 **1-based**
+（那边用 `sk[0]-1` 取），抄表时很容易多一根或少一根，所以单元测试里卡了骨头数、索引范围、
+每个关键点至少出现在一根骨头里。
 
 ## 曝光与增益（测光）
 
@@ -142,6 +164,8 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 |---|---|
 | `camera/annotated` | 标注图：检测框 + 左上角人数横幅 |
 | `camera/annotated/boxes` | 同一批框的 `Boxes2D`，可悬停看标签与置信度 |
+| `camera/annotated/keypoints` | 仅 pose：关键点 `Points2D`，标签是 `nose`/`left_shoulder` 等 |
+| `camera/annotated/skeleton` | 仅 pose：骨架 `LineStrips2D`（两端都过 `kpt_conf` 才连） |
 | `person/count` | 人数曲线（右侧 TimeSeriesView） |
 | `person/events` | 人数变化日志（带各框置信度） |
 
@@ -164,7 +188,7 @@ MVS SDK 的像素转换 / GenICam producer 库是 `dlopen` 时才加载的，而
 ```bash
 uv run ruff check .            # lint
 uv run ruff format --check .   # 格式
-uv run pytest                  # 54 个单元测试，都不需要相机
+uv run pytest                  # 69 个单元测试，都不需要相机
 uv run python tools/bench.py   # 分环节计时（等帧 / 转换 / 推理）
 ```
 
@@ -183,13 +207,17 @@ src/hik_person/
 ├── config.py    config.toml 读取 / 命令行覆盖 / 路径解析
 ├── colors.py    像素格式映射 + Bayer/BGR/RGB 转换
 ├── mvs.py       MVS 运行时环境、枚举、取流、测光、特性改写
-├── detect.py    ultralytics YOLO 人体检测（含人数横幅）
-├── viz.py       rerun 记录与布局（Image / Boxes2D / Scalars / TextLog）
+├── annotate.py  人数横幅（两条任务线共用）
+├── detect.py    ultralytics YOLO 人体检测
+├── pose.py      ultralytics YOLO 姿态（COCO-17 骨架）
+├── viz.py       rerun 记录与布局（Image / Boxes2D / Points2D / LineStrips2D / Scalars）
 └── __main__.py  CLI，只负责把参数接起来
 tools/
 ├── check_colors.py  颜色链路对比验证
 └── bench.py         分环节计时
-models/best.pt       训练好的权重
+models/
+├── best.pt          自训练的人体检测权重
+└── yolo26n-pose.pt  ultralytics 姿态权重
 ```
 
 ## 实测性能（1440×1080 + RTX 4060 Laptop）
