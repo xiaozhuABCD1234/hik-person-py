@@ -1,0 +1,16 @@
+# 文本文件统一 LF，避免跨平台 diff 噪音
+* text=auto eol=lf
+
+*.py  text
+*.md  text
+*.toml text
+*.yaml text
+
+# 二进制：git 不要尝试做文本 diff
+*.pt  binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+
+# 生成的锁文件不参与语言统计
+uv.lock linguist-generated=true

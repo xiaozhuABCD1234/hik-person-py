@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# uv / 虚拟环境（uv.lock 要提交，保证可复现）
+.venv/
+
+# 工具缓存
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# 运行时产物
+out/
+shots/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store

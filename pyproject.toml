@@ -1,0 +1,50 @@
+[project]
+name = "hik-person"
+version = "0.1.0"
+description = "HIKROBOT MVS camera + YOLO person detection + Rerun visualization"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=2.0",
+    "opencv-python>=4.10",
+    "ultralytics>=8.4",
+    "rerun-sdk>=0.22",
+]
+
+[project.scripts]
+hik-person = "hik_person.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hik_person"]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tools", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# 本仓库的注释/文档按中文写，全角标点（，、；：「」（））是有意为之，
+# RUF001/002/003 的“ambiguous unicode character”在这里全是误报。
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 本机 PYTHONPATH 里带着别的项目的 site-packages，pytest 会自动加载它们的插件
+# 并在收集阶段崩掉。这里显式禁用这两个插件名；-p no:<name> 对不存在的插件是
+# 空操作，所以在没有这些包的机器上也无害。
+addopts = "-q -p no:launch_testing -p no:launch_ros"
