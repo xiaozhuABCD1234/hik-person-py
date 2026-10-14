@@ -101,12 +101,14 @@ server_memory_limit = "512MB"
 jpeg_quality = 75
 # viewer 的端口；被占用时 rerun 会直接拿来用。
 port = 9876
+# 摔倒报警灯的闪烁频率（Hz）：红灯明暗交替；0 = 常亮不闪。
+fall_light_flash = 2.0
 
 # 右列放什么。数值行 = 每人一行短文本（距/速/状态/有效关节），速度 = 每人一条曲线
 # （与数值行的「速」同源）。人数曲线默认不上（数据一直在，只是不占格子），
 # 要看就 show_count = true。轨迹不再画到画面上（tracker 仍记录，见 [track].trail_*）。
 show_values = true
-show_speed = true
+show_metrics = true
 show_count = false
 
 [pose3d]
@@ -196,3 +198,25 @@ view = false
 jsonl = ""
 # 写 JSONL 的频率（Hz）。跟踪是高频的，日志没必要跟满。
 hz = 5.0
+
+
+[fall]
+# 摔倒检测：三步判据（冲击 -> 躺倒 -> 持续），缺一步都不报警，见 fall.py。
+# 已知边界：主动快速躺下会报警（与摔倒分不开）；被抱起来搬走可能误报。
+enabled = true
+# 冲击：向下速度超过它（m/s），或在窗口内从高点掉了这么多（m）。
+impact_speed = 1.0
+drop_height = 0.35
+impact_window = 0.7
+# 躺倒：躯干与"上"方向夹角超过它（度）；角度被遮时用"低于站立参考这么多"（m）兜底。
+lying_angle = 60.0
+lying_height = 0.35
+# 时序：躺倒连续保持这么久（s）才确认；冲击后超过 confirm_window（s）就当没事。
+lying_time = 1.2
+confirm_window = 3.0
+# 恢复到直立（度）并保持这么久（s）才解除报警。
+recover_angle = 35.0
+recover_time = 1.0
+# 注意：这边的米制阈值都建立在单目估计深度上，是"估计尺度"的经验值，
+# 调参请对着 person/metrics/fall 那两条曲线（torso_angle / fall_level）看，
+# 别照搬 d435i（真深度）的值。

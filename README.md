@@ -50,7 +50,8 @@ save_dir = ""
 enabled = true
 save = ""                     # 非空则写 .rrd 且不弹窗口
 show_values = true            # 右列顶部的数值行（每人一行）
-show_speed = true             # 右列的每人速度曲线（与数值行的「速」同源）
+show_metrics = true           # 右列的指标曲线（速度、摔倒）
+fall_light_flash = 2.0        # 摔倒报警灯的闪烁频率 Hz（0 = 常亮）
 show_count = false            # 右列的人数曲线（数据一直在，默认不占格子）
 
 [pose3d]
@@ -78,6 +79,18 @@ trail_interval = 0.1          # 轨迹采样间隔（秒）
 speed_smoothing = 0.3         # 速度指数平滑时间常数（秒），0 = 不平滑
 speed_deadband = 0.15         # 低于它当"静止"（只影响显示与状态标签）
 
+[fall]
+enabled = true                # 摔倒检测：三步判据（冲击 -> 躺倒 -> 持续）
+impact_speed = 1.0            # m/s：向下速度超过它算冲击
+drop_height = 0.35            # m：窗口内从高点掉这么多也算冲击
+impact_window = 0.7           # s：下沉判据的窗口
+lying_angle = 60.0            # 度：躯干与"上"方向夹角超过它算躺倒
+lying_height = 0.35           # m：低于站立参考这么多也算躺倒（角度被遮时兜底）
+lying_time = 1.2              # s：躺倒连续保持多久才确认报警
+confirm_window = 3.0          # s：冲击后多久内确认有效，超时当没事
+recover_angle = 35.0          # 度：恢复到直立
+recover_time = 1.0            # s：直立保持多久才解除报警
+
 [world]
 enabled = false               # 相机系 -> 世界（地面）系；没量过安装角度就别开
 height = 1.0                  # 光心离地高度（米）
@@ -103,7 +116,8 @@ warning: 未知配置项 [rerun].enable，已忽略
 命令行覆盖（`--help` 有全部）：`--serial --index --camera-fps --exposure-us --gain-db
 --brightness --exposure-start-us --exposure-fps-headroom --read-timeout-ms --feature
 --weights --conf --imgsz --device --kpt-conf --detect-hz --duration --max-frames --save-dir
---rerun/--no-rerun --rerun-save --show-values/--no-show-values --show-speed --show-count
+--rerun/--no-rerun --rerun-save --show-values/--no-show-values --show-metrics --show-count
+--fall/--no-fall --fall-light-flash
 --show-speed/--no-show-speed
 --track-iou-threshold --track-match-max-distance --track-max-missed --track-trail-length
 --world/--no-world --world-height --world-pitch --world-yaw --world-roll --world-view
@@ -328,7 +342,10 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 | `camera/pose3d/positions` | 每个人的 3D 位置球，标签 = `#id 距离 · 地面速度` |
 | `world/...` | 开了 `[world]` 才有：骨架/位置的世界系副本（`RIGHT_HAND_Z_UP`） |
 | `person/values` | 每人一行的极简数值（距/速/状态/有效关节），右列顶部 |
-| `person/metrics/<组>/<指标>/<id>` | 每个人的指标曲线（`person/metrics/speed/speed/<id>` 速度；颜色与图例名由 id 决定） |
+| `person/metrics/<组>/<指标>/<id>` | 每个人的指标曲线：`speed`（速度）、`fall`（`fall_level` 等级 / `torso_angle` 躯干角）；颜色与图例名由 id 决定 |
+| `person/fall_light` | **摔倒报警灯**（一格 2D：整块颜色 + 格内文字；红=摔倒会闪 / 琥珀=疑似倒地 / 绿=正常 / 暗蓝灰=无人） |
+| `person/fall_alert` | 报警灯的纯文本副本（markdown，可选中复制） |
+| `person/fall` | 摔倒状态变化日志（只在跳变时记一条） |
 
 ### 单目 3D 骨架（右下角小窗）
 
@@ -416,6 +433,48 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 不可全信 —— 同一次运行内做相对比较（谁更快、谁更靠前）才有意义。`valid_keypoints` /
 `coverage`（有效关节比例）是尺度无关的可信度自检。d435i 那边的真深度可以直接量身高/肩宽，
 这边不出这类绝对量指标。
+
+## 摔倒检测（`[fall]`）
+
+`fall.py` 是一条**单人时序状态机**（纯逻辑、可单测），三步判据**缺一步都不报警**，
+所以不会把"弯腰系鞋带""快速蹲一下""主动慢慢躺下"当成摔倒：
+
+| 步 | 信号 | 为什么这么定 |
+|---|---|---|
+| 1 冲击 | 向下速度 ≥ `impact_speed`(1.0 m/s)，或 `impact_window`(0.7 s) 内从窗口高点掉了 `drop_height`(0.35 m) | 速度滤波有滞后，所以再用"位移"兜一道 |
+| 2 躺倒 | 躯干与"上"方向夹角 ≥ `lying_angle`(60°)；角度测不到时用"比站立参考低 `lying_height`(0.35 m)"兜底 | 躺着时关键点常被床/腿挡住；站立参考是自动学的 EMA，不用量相机多高 |
+| 3 持续 | 躺倒连续 `lying_time`(1.2 s)，且必须在冲击后 `confirm_window`(3 s) 内 | 把"快速蹲一下又起来"排掉 |
+
+报警后要**直立保持 `recover_time`(1 s)** 才解除（人爬起来的过程中不闪烁）。
+状态：`0 正常` / `1 疑似`（有冲击或正在倒地）/ `2 摔倒`（报警）。
+
+```bash
+uv run hik-person --no-fall                  # 关掉摔倒检测（连报警灯格子一起收起来）
+uv run hik-person --fall-light-flash 0       # 报警灯常亮，不闪
+```
+
+报警长什么样（与 d435i 一致）：
+
+- **「摔倒警报」一格**（右列指标格子的第三格）：**整块颜色 + 文字画在色块里面**——
+  颜色是屏幕上最先被看见的东西，也不用表情符号：
+
+  | 状态 | 颜色 | 文字 |
+  |---|---|---|
+  | 摔倒（level 2） | **红**（和"整个人变红"同一个色，2 Hz 闪） | `摔倒 #1` |
+  | 疑似倒地（有冲击/正在倒地） | 琥珀 | `疑似倒地 #1` |
+  | 正常 | 绿 | `正常` |
+  | 画面内无人 | 暗蓝灰（故意不用绿：没人在 ≠ 一切正常） | `画面内无人` |
+
+  红字下面跟着明细行（`#1 · 躯干 90° · 4.1 m · 0.7 s`）与最近一次状态变化，
+  这些字都在色块里面；同一格还有一份纯文本副本 `person/fall_alert`（可选中/复制）。
+- **人变红**：2D 框/关键点/骨架与 3D 位置球都换 `ALARM_COLOR`（比"去某个框里找条线"快）
+- 数值行行首插 `⚠ 摔倒 89°`（确认前只写"倒地中"；仅挨一下冲击的正常动作不插）
+- 曲线：`person/metrics/fall/fall_level/<id>` 与 `torso_angle/<id>`（0/1/2 与度数）
+- 日志：`person/fall` 只在状态跳变时记一条（摔倒 / 疑似 / 恢复）
+
+**尺度提醒**：这边的深度是单目估计的，`impact_speed` / `drop_height` / `lying_height`
+都是"估计尺度"下的经验值（见 `fall.py` 的说明）；躯干夹角与时序判据不受尺度影响。
+调阈值请对着 `person/metrics/fall` 那两条曲线看，别照搬 d435i（真深度）实测出来的数。
 
 ## 世界坐标系与 JSON Lines 输出
 
