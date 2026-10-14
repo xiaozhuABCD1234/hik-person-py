@@ -45,3 +45,19 @@ def test_default_run_records_nothing_to_disk(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(rr, "spawn", lambda **kw: None)
     RerunView(spawn=True)
     assert saved == []
+
+
+def test_default_logs_static_without_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认不留历史：图像/框必须 static，否则 viewer 内存会随帧数一直涨。"""
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        rr, "log", lambda entity, data, **kw: calls.append((entity, kw.get("static", False)))
+    )
+
+    v = RerunView(spawn=False)
+    v.log_frame(frame(), blank())
+
+    heavy = [static for entity, static in calls if entity.startswith("camera/")]
+    assert heavy and all(heavy), f"图像/框没走 static：{calls}"
+    # 人数曲线需要时间戳（它只有几十字节/帧）
+    assert ("person/count", False) in calls

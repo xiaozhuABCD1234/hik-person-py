@@ -49,20 +49,23 @@ class RerunView:
         spawn: bool = True,
         save_path: str | None = None,
         kpt_conf: float = 0.5,
-        memory_limit: str = "2GB",
+        keep_history: bool = False,
+        memory_limit: str = "512MB",
         server_memory_limit: str = "512MB",
         jpeg_quality: int = 75,
         port: int = 9876,
     ):
         """跑起来就弹 viewer（除非给了 save_path）。
 
-        viewer 只当显示器用：不给 save_path 就不往磁盘写任何东西；
-        memory_limit 到顶后 rerun 丢最旧数据，不会把整场会话堆在内存里。
+        viewer 只当显示器：不给 save_path 就不往磁盘写任何东西。
+        keep_history=False（默认）时图像/框/关键点用 static 记录，viewer 只保留最新一份，
+        没有时间轴可回拖，内存不随帧数涨；memory_limit 是兼底硬上限。
         """
         import rerun as rr
 
         self.rr = rr
         self.kpt_conf = kpt_conf
+        self.keep_history = keep_history
         self.jpeg_quality = int(jpeg_quality)
         self._last_count: int | None = None  # None = 还没记录过人数
         self._image_size: tuple[int, int] | None = None  # (宽, 高)，用于固定取景
@@ -115,7 +118,9 @@ class RerunView:
     def log_frame(self, frame, annotated_bgr, *, detections=(), poses=()) -> None:
         """记一帧；detect 任务传 detections，pose 任务传 poses。"""
         rr = self.rr
-        self._set_time(frame.frame_number)
+        number = frame.frame_number
+        if self.keep_history:
+            self._set_time(number)
 
         # 分辨率变了（换相机/换模式）才重发 blueprint，把取景钉到新尺寸
         height, width = annotated_bgr.shape[:2]
@@ -123,24 +128,37 @@ class RerunView:
             self._image_size = (width, height)
             self._send_blueprint(width, height)
 
-        rr.log("camera/annotated", self._encode(annotated_bgr))
+        self._log("camera/annotated", self._encode(annotated_bgr))
         instances = [*detections, *poses]
         self._log_boxes(instances)
         if poses:
             self._log_poses(poses)
 
         count = len(instances)
-        scalar = getattr(rr, "Scalars", None) or rr.Scalar
-        rr.log("person/count", scalar(count))
-
         if count != self._last_count:
             self._last_count = count
-            rr.log(
+            self._log(
                 "person/events",
                 rr.TextLog(
                     f"{count} person(s): " + ", ".join(f"conf={d.conf:.2f}" for d in instances)
                 ),
             )
+
+        # 人数只是几十字节的标量，一直带时间戳：右边那条曲线靠它画
+        self._set_time(number)
+        scalar = getattr(rr, "Scalars", None) or rr.Scalar
+        rr.log("person/count", scalar(count))
+
+    def _log(self, entity: str, data) -> None:
+        """默认 static：不带时间戳，viewer 只保留最新一份，没有历史可回拖。
+
+        图像/框/关键点是内存大头（原图 4.67 MB/帧），它们不留历史后 viewer 的内存
+        就不随帧数涨；人数曲线需要时间戳，在 log_frame 里单独 set_time 后写。
+        """
+        if self.keep_history:
+            self.rr.log(entity, data)
+        else:
+            self.rr.log(entity, data, static=True)
 
     def _encode(self, bgr: np.ndarray):
         """按 jpeg_quality 压过再送。
@@ -161,14 +179,14 @@ class RerunView:
         # 图像在 camera/annotated，框挂到它的子路径上就会叠加显示
         if not instances:
             empty = np.zeros((0, 2), dtype=np.float32)
-            rr.log("camera/annotated/boxes", cls(centers=empty, sizes=empty))
+            self._log("camera/annotated/boxes", cls(centers=empty, sizes=empty))
             return
         xyxy = np.array([d.xyxy for d in instances], dtype=np.float32)
         centers = np.stack(
             [(xyxy[:, 0] + xyxy[:, 2]) * 0.5, (xyxy[:, 1] + xyxy[:, 3]) * 0.5], axis=1
         )
         sizes = np.stack([xyxy[:, 2] - xyxy[:, 0], xyxy[:, 3] - xyxy[:, 1]], axis=1)
-        rr.log(
+        self._log(
             "camera/annotated/boxes",
             cls(
                 centers=centers,
@@ -193,7 +211,7 @@ class RerunView:
                 labels.extend(names)
             strips.extend(bones(pose.keypoints, pose.kpt_conf, threshold=self.kpt_conf))
 
-        rr.log(
+        self._log(
             "camera/annotated/keypoints",
             rr.Points2D(
                 np.concatenate(points) if points else np.zeros((0, 2), dtype=np.float32),
@@ -202,4 +220,4 @@ class RerunView:
                 radii=3.0,
             ),
         )
-        rr.log("camera/annotated/skeleton", rr.LineStrips2D(strips, colors=SKELETON_COLOR))
+        self._log("camera/annotated/skeleton", rr.LineStrips2D(strips, colors=SKELETON_COLOR))

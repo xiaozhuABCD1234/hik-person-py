@@ -108,7 +108,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--rerun-memory-limit",
         default=None,
-        help='覆盖 [rerun].memory_limit，如 "2GB"/"75%%"',
+        help='覆盖 [rerun].memory_limit，如 "512MB"/"75%%"',
+    )
+    p.add_argument(
+        "--rerun-keep-history",
+        action="store_true",
+        default=None,
+        help="覆盖 [rerun].keep_history=true：保留时间轴（内存会一直涨）",
     )
     p.add_argument(
         "--rerun-jpeg-quality",
@@ -220,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             spawn=not rrd,
             save_path=rrd,
             kpt_conf=settings.kpt_conf,
+            keep_history=settings.rerun_keep_history,
             memory_limit=settings.rerun_memory_limit,
             server_memory_limit=settings.rerun_server_memory_limit,
             jpeg_quality=settings.rerun_jpeg_quality,
@@ -230,8 +237,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  打开方式: rerun {rrd}   （或拖进 rerun viewer）")
         else:
             print(
-                f"rerun: viewer 已启动（内存上限 {settings.rerun_memory_limit}，"
-                f"到顶丢最旧数据；图像 JPEG {settings.rerun_jpeg_quality}）"
+                f"rerun: viewer 已启动（记忆历史 {settings.rerun_keep_history}，"
+                f"内存上限 {settings.rerun_memory_limit}，图像 JPEG {settings.rerun_jpeg_quality}）"
             )
             print("  不要窗口就用 --no-rerun")
 

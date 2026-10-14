@@ -46,12 +46,12 @@ read_timeout_ms = 1000
 feature = ["ADCBitDepth=Bits_8"]
 
 [detector]
-# "detect" = 人体检测框（weights 用自训练模型）；
-# "pose"   = 关键点/骨架（weights 用 YOLO pose，如 models/yolo26n-pose.pt）。
+# "pose"   = 关键点/骨架（默认，weights 用 YOLO pose 权重）；
+# "detect" = 只要检测框（weights 用自训练模型 models/best.pt）。
 # 切任务时同时改 task 和 weights 两项。
-task = "detect"
+task = "pose"
 # 相对路径按项目根解析。
-weights = "models/best.pt"
+weights = "models/yolo26n-pose.pt"
 conf = 0.35
 iou = 0.50
 imgsz = 640
@@ -76,9 +76,13 @@ save_min_interval = 1.0
 enabled = true
 # 默认纯显示：不写任何文件。非空才写 .rrd 且不弹窗口（调试/无桌面时才用）。
 save = ""
-# viewer 内存上限，到顶就丢最旧数据、不把整场会话堆在内存里。
-# rerun 自己的默认是 75%（本机约 23 GB），长跑会把内存吃满。
-memory_limit = "2GB"
+
+# false（默认）= 图像/框/关键点用 static 记录：viewer 只保留最新一份，没有时间轴可回拖，
+# 内存不随帧数涨。true = 带时间戳、可回拖，但内存一直涨（每帧约 0.13 MB 压缩图）。
+keep_history = false
+
+# 兼底硬上限（到顶丢最旧数据）；rerun 自己的默认是 75%（本机约 23 GB）。
+memory_limit = "512MB"
 server_memory_limit = "512MB"
 # 图像送进 viewer 前先压成 JPEG（质量 1-100，0 = 不压原图）。
 # 原图 1440×1080 每帧 4.67 MB，viewer 内存增长实测 +70 MB/s；

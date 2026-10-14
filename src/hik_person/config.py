@@ -43,8 +43,8 @@ class Settings:
     feature: list[str] = field(default_factory=list)
 
     # -------------------------------------------------------------- [detector]
-    task: str = "detect"
-    weights: str = "models/best.pt"
+    task: str = "pose"
+    weights: str = "models/yolo26n-pose.pt"
     conf: float = 0.35
     iou: float = 0.50
     imgsz: int = 640
@@ -63,8 +63,10 @@ class Settings:
     rerun_enabled: bool = True
     # 非空才写 .rrd（默认纯显示，不往磁盘记任何东西）
     rerun_save: str = ""
+    # False（默认）= 图像/框/关键点用 static 记录，viewer 只保留最新一份，没有时间轴可回拖
+    rerun_keep_history: bool = False
     # viewer 内存上限，到了就丢最旧数据；rerun 自己的默认是 75%%（本机约 23 GB）
-    rerun_memory_limit: str = "2GB"
+    rerun_memory_limit: str = "512MB"
     # 与 viewer 同进程的 gRPC 缓冲（给后到的 viewer 补数据用）
     rerun_server_memory_limit: str = "512MB"
     # 图像送进 viewer 前先压成 JPEG；0 = 原图（4.67 MB/帧，viewer 内存约差 10 倍）
@@ -100,6 +102,7 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("run", "save_min_interval"): "save_min_interval",
     ("rerun", "enabled"): "rerun_enabled",
     ("rerun", "save"): "rerun_save",
+    ("rerun", "keep_history"): "rerun_keep_history",
     ("rerun", "memory_limit"): "rerun_memory_limit",
     ("rerun", "server_memory_limit"): "rerun_server_memory_limit",
     ("rerun", "jpeg_quality"): "rerun_jpeg_quality",

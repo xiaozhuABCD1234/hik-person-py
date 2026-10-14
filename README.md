@@ -15,7 +15,7 @@ uv run hik-person --show-config      # 打印合并后的生效参数
 uv run hik-person                    # 按 config.toml 跑（开 rerun 窗口）
 uv run hik-person --duration 30      # 临时覆盖某一项
 uv run hik-person --no-rerun --max-frames 300     # 只看结果，不开窗口不写文件
-uv run hik-person --task pose --weights models/yolo26n-pose.pt   # 试姿态估计
+uv run hik-person --task detect --weights models/best.pt        # 换成自训练的检测模型
 ```
 
 ## 参数文件
@@ -35,8 +35,8 @@ feature = ["ADCBitDepth=Bits_8"]   # 任意 GenICam 特性
 
 [detector]
 # detect = 人体检测框；pose = 关键点/骨架（切任务时 weights 也要一起改）
-task = "detect"
-weights = "models/best.pt"    # 相对路径按项目根解析；pose 用 models/yolo26n-pose.pt
+task = "pose"
+weights = "models/yolo26n-pose.pt"   # 相对路径按项目根解析；detect 用 models/best.pt
 conf = 0.35
 imgsz = 640
 kpt_conf = 0.5                # 仅 pose：关键点置信度阈值
@@ -98,8 +98,8 @@ uv run hik-person --feature ADCBitDepth=Bits_8 --camera-fps 249 --brightness 0
 
 | `task` | `weights` | 输出 |
 |---|---|---|
-| `detect`（默认） | `models/best.pt` | 人体检测框 |
-| `pose` | `models/yolo26n-pose.pt` | 检测框 + 17 个 COCO 关键点与骨架 |
+| `pose`（默认） | `models/yolo26n-pose.pt` | 检测框 + 17 个 COCO 关键点与骨架 |
+| `detect` | `models/best.pt` | 只要人体检测框 |
 
 ```bash
 uv run hik-person --task pose --weights models/yolo26n-pose.pt
@@ -263,8 +263,8 @@ tools/
 ├── check_colors.py  颜色链路对比验证
 └── bench.py         分环节计时
 models/
-├── best.pt          自训练的人体检测权重
-└── yolo26n-pose.pt  ultralytics 姿态权重
+├── yolo26n-pose.pt  姿态权重（默认）
+└── best.pt          自训练的人体检测权重
 ```
 
 ## 实测性能（1440×1080 + RTX 4060 Laptop）
@@ -304,6 +304,6 @@ AGPL-3.0-or-later，全文见 [LICENSE](LICENSE)。
 
 - 依赖 [ultralytics](https://github.com/ultralytics/ultralytics)（AGPL-3.0），
   本项目因此采用同一许可证。对外分发、或以网络服务形式提供时，需按 AGPL 提供源码。
-- `models/best.pt` 为本项目使用的检测权重，随本仓库一同提供。
+- `models/yolo26n-pose.pt` 为默认权重（ultralytics 官方姿态模型）；`models/best.pt` 是自训练的检测权重，随仓库一同提供。
 - 运行需要海康 **MVS SDK**（`/opt/MVS`）。它是海康的专有软件，不在本仓库内，
   也不由本许可证覆盖；使用它需遵守海康自己的许可条款。
