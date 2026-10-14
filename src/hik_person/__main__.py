@@ -102,6 +102,9 @@ def main(argv: list[str] | None = None) -> int:
         if rrd:
             print(f"rerun 记录 -> {rrd}")
             print(f"  打开方式: rerun {rrd}   （或拖进 rerun viewer）")
+        else:
+            print("rerun: 已启动 viewer 窗口（独立进程，关掉窗口不影响本程序）")
+            print("  不要窗口就用 --rerun-save out.rrd 或 --no-rerun")
 
     save_dir = Path(args.save_dir) if args.save_dir else None
     if save_dir:
