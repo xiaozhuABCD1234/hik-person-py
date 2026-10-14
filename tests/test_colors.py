@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """颜色转换的单元测试 —— 纯函数，不需要相机。
 
 这里把「MVS BayerRG8 必须用 cv2.COLOR_BayerBG2BGR」这条约定钉死：

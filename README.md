@@ -123,6 +123,16 @@ models/best.pt       训练好的权重
 （实测约 13 fps 稳定、每两帧推理一次）。两者相等时帧到达时刻正好压在周期边界上，
 代码里留了 10% 容差来避开这个抖动。
 
+## 许可证
+
+AGPL-3.0-or-later，全文见 [LICENSE](LICENSE)。
+
+- 依赖 [ultralytics](https://github.com/ultralytics/ultralytics)（AGPL-3.0），
+  本项目因此采用同一许可证。对外分发、或以网络服务形式提供时，需按 AGPL 提供源码。
+- `models/best.pt` 为本项目使用的检测权重，随本仓库一同提供。
+- 运行需要海康 **MVS SDK**（`/opt/MVS`）。它是海康的专有软件，不在本仓库内，
+  也不由本许可证覆盖；使用它需遵守海康自己的许可条款。
+
 ## 故障排查
 
 * `MV_CC_OpenDevice failed` —— 相机被别的进程占用（MVS 对 USB3 不强制互斥）：

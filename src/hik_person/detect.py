@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """YOLO 人体检测（用训练好的 models/best.pt）。"""
 
 from __future__ import annotations

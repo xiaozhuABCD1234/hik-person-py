@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """MVS SDK 需要的运行时环境变量 —— 纯函数，不需要相机、不加载 SDK。"""
 
 from __future__ import annotations

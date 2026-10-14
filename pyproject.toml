@@ -3,6 +3,8 @@ name = "hik-person"
 version = "0.1.0"
 description = "HIKROBOT MVS camera + YOLO person detection + Rerun visualization"
 readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "numpy>=2.0",

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """hik-person: HIKROBOT MVS 相机 -> YOLO 人体检测 -> rerun。
 
 uv run hik-person --list

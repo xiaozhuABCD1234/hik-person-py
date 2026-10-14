@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """像素格式与颜色转换。
 
 相机原生输出 BayerRG8，转换统一走 SDK：MV_CC_SetBayerCvtQuality(1) 配高质量插值，

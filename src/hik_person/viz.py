@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """rerun 可视化（对 rerun 版本做最小兼容）。
 
 进 rerun 前统一 bgr_to_rgb()：rr.Image 默认按 RGB 解读三通道数据，

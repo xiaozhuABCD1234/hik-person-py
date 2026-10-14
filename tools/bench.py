@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """分环节计时：等帧 / SDK 转换 / YOLO 推理 / rerun 前的颜色转换。
 
 uv run python tools/bench.py

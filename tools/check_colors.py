@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """验证颜色链路：MVS BayerRG8 -> BGR，三条路径在同一帧上对比。
 
   1. SDK  MV_CC_ConvertPixelTypeEx(BGR8_Packed)   <- 本包默认取流路径
