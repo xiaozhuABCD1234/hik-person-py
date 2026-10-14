@@ -238,6 +238,29 @@ def test_log_people3d_with_nobody_clears_the_view(monkeypatch: pytest.MonkeyPatc
     assert "camera/pose3d/joints" in entities  # 记一份空的，旧骨架才会消失
 
 
+def test_trails_can_be_hidden_from_the_view(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--no-show-trails：关掉的只是显示，轨迹记录（JSONL/坐标）照旧。"""
+    strips: list[int] = []
+
+    def fake_line_strips3d(data, **kw):
+        strips.append(len(data))
+        return object()
+
+    monkeypatch.setattr(rr, "LineStrips3D", fake_line_strips3d)
+    monkeypatch.setattr(rr, "log", lambda entity, data, **kw: None)
+
+    v = RerunView(spawn=False, show_pose3d=True, show_trails=False)
+    v.log_people3d([person()])
+
+    # LineStrips3D 被调两次（骨架、轨迹）：轨迹那次必须是空的（旧轨迹才会从画面消失）
+    assert len(strips) == 2, strips
+    assert strips[1] == 0
+
+    strips.clear()
+    RerunView(spawn=False, show_pose3d=True).log_people3d([person()])
+    assert strips[1] == 1  # 默认还是画的
+
+
 def test_world_view_logs_a_transformed_copy(monkeypatch: pytest.MonkeyPatch) -> None:
     """开了 [world]：世界系那份必须是变换后的坐标，而不是相机系原样。"""
     captured: dict = {}

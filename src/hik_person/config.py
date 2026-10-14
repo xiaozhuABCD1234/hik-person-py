@@ -88,6 +88,8 @@ class Settings:
     rerun_show_values: bool = True
     rerun_show_coords: bool = True
     rerun_show_count: bool = False
+    # 3D 视图里要不要画运动轨迹（只影响显示；轨迹记录本身由 [track] 管）。
+    rerun_show_trails: bool = True
 
     # ---------------------------------------------------------------- [pose3d]
     # 单目 3D：yolo26x-depth 给每个关键点补深度，rerun 右下角小窗画 3D 骨架。
@@ -183,6 +185,7 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("rerun", "show_values"): "rerun_show_values",
     ("rerun", "show_coords"): "rerun_show_coords",
     ("rerun", "show_count"): "rerun_show_count",
+    ("rerun", "show_trails"): "rerun_show_trails",
     ("pose3d", "enabled"): "pose3d_enabled",
     ("pose3d", "weights"): "pose3d_weights",
     ("pose3d", "imgsz"): "pose3d_imgsz",

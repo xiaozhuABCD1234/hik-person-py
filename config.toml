@@ -107,6 +107,9 @@ port = 9876
 show_values = true
 show_coords = true
 show_count = false
+# 3D 视图里要不要画运动轨迹。关掉的只是显示，轨迹记录本身由 [track] 管
+# （要连记录一起停掉就 trail_length = 0）。
+show_trails = true
 
 [pose3d]
 # 单目 3D 骨架：yolo26*-depth 给 pose 的 17 个关键点补一个 z，在 rerun 右下角

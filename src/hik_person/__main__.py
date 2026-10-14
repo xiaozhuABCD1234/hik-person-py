@@ -158,6 +158,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="覆盖 [rerun].show_count：右列要不要人数曲线（默认不上）",
     )
+    p.add_argument(
+        "--show-trails",
+        dest="rerun_show_trails",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="覆盖 [rerun].show_trails：3D 视图要不要运动轨迹（默认画）",
+    )
 
     pose3d_group = p.add_mutually_exclusive_group()
     pose3d_group.add_argument(
@@ -377,6 +384,7 @@ def main(argv: list[str] | None = None) -> int:
             show_values=settings.rerun_show_values,
             show_coords=settings.rerun_show_coords,
             show_count=settings.rerun_show_count,
+            show_trails=settings.rerun_show_trails,
             world=world,
             show_world_view=settings.world_view,
             eye=settings.pose3d_eye,

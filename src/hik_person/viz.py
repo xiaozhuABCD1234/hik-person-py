@@ -11,7 +11,7 @@
 ``camera/depth``                     估计深度（DepthImage，悬停看米数）
 ``camera/pose3d``                    相机系 3D 视图根（RIGHT_HAND_Y_DOWN）
 ``camera/pose3d/{joints,skeleton}``  3D 骨架（单目深度）
-``camera/pose3d/trails``             每个人的运动轨迹
+``camera/pose3d/trails``             每个人的运动轨迹（`[rerun].show_trails` 可关）
 ``camera/pose3d/positions``          每个人的 3D 位置（标签 = id + 距离 + 速度）
 ``person/values``                    极简数值行（每人一行短文本）
 ``person/coords/<id>/{x,y,z}``       每个人的坐标曲线（相机系，米）
@@ -102,6 +102,7 @@ class RerunView:
         show_values: bool = True,
         show_coords: bool = True,
         show_count: bool = False,
+        show_trails: bool = True,
         world=None,
         show_world_view: bool = False,
         eye: tuple[float, float, float] = (0.0, 0.0, -1.5),
@@ -125,6 +126,9 @@ class RerunView:
         self.show_values = bool(show_values)
         self.show_coords = bool(show_coords)
         self.show_count = bool(show_count)
+        # 轨迹是给人看“他怎么走过来”的；不看就关掉显示，但跟踪里的轨迹照旧在记
+        # （JSONL/坐标曲线不受影响）—— 想连记录一起停用 [track].trail_length = 0。
+        self.show_trails = bool(show_trails)
         self.world = world
         self.show_world_view = bool(show_world_view and world is not None)
         self.eye = tuple(eye)
@@ -440,7 +444,7 @@ class RerunView:
             for strip in person.strips:
                 strips.append(np.asarray(strip, dtype=np.float32))
                 strip_colors.append(color)
-            if len(person.trail) > 1:
+            if len(person.trail) > 1 and self.show_trails:
                 trails.append(np.asarray(person.trail, dtype=np.float32))
                 trail_colors.append(color)
             if np.isfinite(person.position).all():
