@@ -27,6 +27,8 @@ EXPOSURE_MODES: tuple[str, ...] = ("sdk", "manual")
 REMOVED_KEYS: dict[tuple[str, str], str] = {
     ("detector", "task"): "现在只有 pose 一条线（关键点/骨架），删掉这一行",
     ("detector", "iou"): "pose 线不用 NMS 的 iou 参数（用 ultralytics 默认值），删掉这一行",
+    ("rerun", "show_coords"): "右列改画速度曲线了，这一项现在叫 show_speed",
+    ("rerun", "show_trails"): "轨迹已不再画到画面上（tracker 仍在记，见 [track].trail_*）",
 }
 
 
@@ -84,12 +86,10 @@ class Settings:
     # 图像送进 viewer 前先压成 JPEG；0 = 原图（4.67 MB/帧，viewer 内存约差 10 倍）
     rerun_jpeg_quality: int = 75
     rerun_port: int = 9876
-    # 右列放什么：数值行（每人一行）/ 坐标曲线 / 人数曲线。默认前两个，人数默认不上。
+    # 右列放什么：数值行（每人一行）/ 速度曲线 / 人数曲线。默认前两个，人数默认不上。
     rerun_show_values: bool = True
-    rerun_show_coords: bool = True
+    rerun_show_speed: bool = True
     rerun_show_count: bool = False
-    # 3D 视图里要不要画运动轨迹（只影响显示；轨迹记录本身由 [track] 管）。
-    rerun_show_trails: bool = True
 
     # ---------------------------------------------------------------- [pose3d]
     # 单目 3D：yolo26x-depth 给每个关键点补深度，rerun 右下角小窗画 3D 骨架。
@@ -183,9 +183,8 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("rerun", "jpeg_quality"): "rerun_jpeg_quality",
     ("rerun", "port"): "rerun_port",
     ("rerun", "show_values"): "rerun_show_values",
-    ("rerun", "show_coords"): "rerun_show_coords",
+    ("rerun", "show_speed"): "rerun_show_speed",
     ("rerun", "show_count"): "rerun_show_count",
-    ("rerun", "show_trails"): "rerun_show_trails",
     ("pose3d", "enabled"): "pose3d_enabled",
     ("pose3d", "weights"): "pose3d_weights",
     ("pose3d", "imgsz"): "pose3d_imgsz",

@@ -147,7 +147,7 @@ def test_count_panel_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     sent: list = []
     monkeypatch.setattr(rr, "send_blueprint", lambda bp: sent.append(bp))
 
-    v = RerunView(spawn=False, show_coords=False, show_count=True)
+    v = RerunView(spawn=False, show_speed=False, show_count=True)
     v.log_frame(frame(), [])
     right = sent[0].root_container.contents[1]
     origins = [child.origin for child in right.contents if "TimeSeriesView" in type(child).__name__]
@@ -220,10 +220,36 @@ def test_log_people3d_logs_static_and_sets_coordinates(monkeypatch: pytest.Monke
         "camera/pose3d",
         "camera/pose3d/joints",
         "camera/pose3d/skeleton",
-        "camera/pose3d/trails",
         "camera/pose3d/positions",
     } <= entities
     assert all(static for entity, static in calls if entity.startswith("camera/"))
+
+
+def test_speed_curve_is_per_person_and_coords_are_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """右列那条曲线是"每人一条速度"，不是 x/y/z 坐标。"""
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        rr, "log", lambda entity, data, **kw: calls.append((entity, kw.get("static", False)))
+    )
+
+    v = RerunView(spawn=False)
+    v.log_frame(frame(), [person(2), person(3)])
+
+    entities = [entity for entity, _ in calls]
+    # 路径按组分层（与 d435i 的指标命名一致）：person/metrics/<组>/<指标>/<id>
+    assert "person/metrics/speed/speed/2" in entities
+    assert "person/metrics/speed/speed/3" in entities
+    assert not [entity for entity in entities if entity.startswith("person/coords")], entities
+    # 曲线要带时间戳（static 的话画不成曲线）
+    assert ("person/metrics/speed/speed/2", False) in calls
+
+
+def test_speed_curve_respects_the_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(rr, "log", lambda entity, data, **kw: calls.append(entity))
+
+    RerunView(spawn=False, show_speed=False).log_frame(frame(), [person()])
+    assert not [entity for entity in calls if entity.startswith("person/metrics")], calls
 
 
 def test_log_people3d_with_nobody_clears_the_view(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -238,27 +264,15 @@ def test_log_people3d_with_nobody_clears_the_view(monkeypatch: pytest.MonkeyPatc
     assert "camera/pose3d/joints" in entities  # 记一份空的，旧骨架才会消失
 
 
-def test_trails_can_be_hidden_from_the_view(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--no-show-trails：关掉的只是显示，轨迹记录（JSONL/坐标）照旧。"""
-    strips: list[int] = []
+def test_trails_are_not_drawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """轨迹不再画到画面上（tracker 仍记录，见 [track].trail_*）。"""
+    calls: list[str] = []
+    monkeypatch.setattr(rr, "log", lambda entity, data, **kw: calls.append(entity))
 
-    def fake_line_strips3d(data, **kw):
-        strips.append(len(data))
-        return object()
-
-    monkeypatch.setattr(rr, "LineStrips3D", fake_line_strips3d)
-    monkeypatch.setattr(rr, "log", lambda entity, data, **kw: None)
-
-    v = RerunView(spawn=False, show_pose3d=True, show_trails=False)
-    v.log_people3d([person()])
-
-    # LineStrips3D 被调两次（骨架、轨迹）：轨迹那次必须是空的（旧轨迹才会从画面消失）
-    assert len(strips) == 2, strips
-    assert strips[1] == 0
-
-    strips.clear()
-    RerunView(spawn=False, show_pose3d=True).log_people3d([person()])
-    assert strips[1] == 1  # 默认还是画的
+    RerunView(spawn=False, show_pose3d=True, world=CameraToWorld(height=1.5)).log_people3d(
+        [person()]
+    )
+    assert not [entity for entity in calls if entity.endswith("/trails")], calls
 
 
 def test_world_view_logs_a_transformed_copy(monkeypatch: pytest.MonkeyPatch) -> None:

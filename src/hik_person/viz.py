@@ -11,14 +11,13 @@
 ``camera/depth``                     估计深度（DepthImage，悬停看米数）
 ``camera/pose3d``                    相机系 3D 视图根（RIGHT_HAND_Y_DOWN）
 ``camera/pose3d/{joints,skeleton}``  3D 骨架（单目深度）
-``camera/pose3d/trails``             每个人的运动轨迹（`[rerun].show_trails` 可关）
 ``camera/pose3d/positions``          每个人的 3D 位置（标签 = id + 距离 + 速度）
 ``person/values``                    极简数值行（每人一行短文本）
-``person/coords/<id>/{x,y,z}``       每个人的坐标曲线（相机系，米）
+``person/metrics/speed/<id>``        每个人的速度曲线（右侧，一人一条）
 ``person/count``                     人数标量
 ``person/events``                    人数变化日志
 ``world/...``                        世界系 3D 视图根（RIGHT_HAND_Z_UP，可选）
-``world/{joints,skeleton,trails,positions}``  世界系副本（刚体变换后）
+``world/{joints,skeleton,positions}``  世界系副本（刚体变换后）
 ===================================  =======================================
 
 每个人的颜色由 id 决定（``color_for``），所以同一个 id 在 2D、3D 与坐标曲线里都是
@@ -54,6 +53,21 @@ JOINT_RADIUS = 0.02  # 米：关节球半径
 def color_for(person_id: int) -> tuple[int, int, int]:
     """同一个 id 永远同一个颜色（id 从 1 开始，单调递增）。"""
     return PALETTE[(int(person_id) - 1) % len(PALETTE)]
+
+
+# 指标曲线按"什么时候会一起看"分组：框里的实体路径是 person/metrics/<组>/<指标>/<id>，
+# 组名用来开一个 TimeSeriesView（一人一条曲线，颜色与图例名由 id 决定）。
+METRIC_GROUP: dict[str, str] = {"speed": "speed", "fall_level": "fall", "torso_angle": "fall"}
+
+
+def metric_group_path(group: str) -> str:
+    """一个指标组的视图根（给 TimeSeriesView 的 origin 用）。"""
+    return f"person/metrics/{group}"
+
+
+def metric_path(metric: str, person_id: int) -> str:
+    """一个指标的实体路径（按组分层）。"""
+    return f"{metric_group_path(METRIC_GROUP.get(metric, 'other'))}/{metric}/{person_id}"
 
 
 def value_line(person) -> str:
@@ -100,9 +114,8 @@ class RerunView:
         show_pose3d: bool = False,
         show_depth: bool = False,
         show_values: bool = True,
-        show_coords: bool = True,
+        show_speed: bool = True,
         show_count: bool = False,
-        show_trails: bool = True,
         world=None,
         show_world_view: bool = False,
         eye: tuple[float, float, float] = (0.0, 0.0, -1.5),
@@ -124,11 +137,8 @@ class RerunView:
         self.show_pose3d = show_pose3d
         self.show_depth = show_depth
         self.show_values = bool(show_values)
-        self.show_coords = bool(show_coords)
+        self.show_speed = bool(show_speed)
         self.show_count = bool(show_count)
-        # 轨迹是给人看“他怎么走过来”的；不看就关掉显示，但跟踪里的轨迹照旧在记
-        # （JSONL/坐标曲线不受影响）—— 想连记录一起停用 [track].trail_length = 0。
-        self.show_trails = bool(show_trails)
         self.world = world
         self.show_world_view = bool(show_world_view and world is not None)
         self.eye = tuple(eye)
@@ -177,8 +187,8 @@ class RerunView:
             if self.show_values:
                 panels.append(rrb.TextDocumentView(origin="person/values", name="数值"))
                 shares.append(1)
-            if self.show_coords:
-                panels.append(rrb.TimeSeriesView(origin="person/coords", name="坐标"))
+            if self.show_speed:
+                panels.append(rrb.TimeSeriesView(origin=metric_group_path("speed"), name="速度"))
                 shares.append(2)
             if self.show_count:
                 panels.append(rrb.TimeSeriesView(origin="person/count", name="人数"))
@@ -314,13 +324,14 @@ class RerunView:
         # 曲线一直带时间戳（rerun 靠它画曲线）：人数、每个人的位置坐标
         self._set_time(number)
         self._log_scalar("person/count", count)
-        if self.show_coords:
+        if self.show_speed:
             for person in live:
-                if np.isfinite(person.position).all():
-                    for axis, value in zip("xyz", person.position, strict=True):
-                        self._log_scalar(
-                            f"person/coords/{person.id}/{axis}", float(value), person_id=person.id
-                        )
+                if np.isfinite(person.speed_ground):
+                    self._log_scalar(
+                        metric_path("speed", person.id),
+                        float(person.speed_ground),
+                        person_id=person.id,
+                    )
         if self.show_values:
             self._log_values(live)
 
@@ -429,8 +440,6 @@ class RerunView:
         colors: list[tuple[int, int, int]] = []
         strips: list[np.ndarray] = []
         strip_colors: list[tuple[int, int, int]] = []
-        trails: list[np.ndarray] = []
-        trail_colors: list[tuple[int, int, int]] = []
         positions: list[np.ndarray] = []
         position_labels: list[str] = []
         position_colors: list[tuple[int, int, int]] = []
@@ -444,9 +453,6 @@ class RerunView:
             for strip in person.strips:
                 strips.append(np.asarray(strip, dtype=np.float32))
                 strip_colors.append(color)
-            if len(person.trail) > 1 and self.show_trails:
-                trails.append(np.asarray(person.trail, dtype=np.float32))
-                trail_colors.append(color)
             if np.isfinite(person.position).all():
                 positions.append(np.asarray(person.position, dtype=np.float32))
                 position_labels.append(
@@ -466,7 +472,6 @@ class RerunView:
             ),
         )
         self._log("camera/pose3d/skeleton", rr.LineStrips3D(strips, colors=strip_colors))
-        self._log("camera/pose3d/trails", rr.LineStrips3D(trails, colors=trail_colors))
         self._log(
             "camera/pose3d/positions",
             rr.Points3D(
@@ -482,7 +487,6 @@ class RerunView:
         # 世界系视图：同一个刚体变换套一遍
         world_joints = [self.world.apply(points) for points in joints]
         world_strips = [self.world.apply(strip) for strip in strips]
-        world_trails = [self.world.apply(trail) for trail in trails]
         world_positions = [self.world.apply(point) for point in positions]
         self._log(
             "world/joints",
@@ -496,7 +500,6 @@ class RerunView:
             ),
         )
         self._log("world/skeleton", rr.LineStrips3D(world_strips, colors=strip_colors))
-        self._log("world/trails", rr.LineStrips3D(world_trails, colors=trail_colors))
         self._log(
             "world/positions",
             rr.Points3D(

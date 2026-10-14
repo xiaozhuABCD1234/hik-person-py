@@ -66,7 +66,7 @@ save_min_interval = 2.0
 enabled = false
 save = "/tmp/out.rrd"
 show_values = false
-show_coords = false
+show_speed = false
 show_count = true
 
 [track]
@@ -110,7 +110,7 @@ hz = 2.0
     assert settings.rerun_enabled is False
     assert settings.rerun_save == "/tmp/out.rrd"
     assert settings.rerun_show_values is False
-    assert settings.rerun_show_coords is False
+    assert settings.rerun_show_speed is False
     assert settings.rerun_show_count is True
     assert settings.track_iou_threshold == 0.45
     assert settings.track_match_max_distance == 0.8

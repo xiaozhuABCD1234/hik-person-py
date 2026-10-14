@@ -50,9 +50,8 @@ save_dir = ""
 enabled = true
 save = ""                     # 非空则写 .rrd 且不弹窗口
 show_values = true            # 右列顶部的数值行（每人一行）
-show_coords = true            # 右列的每人坐标曲线
+show_speed = true             # 右列的每人速度曲线（与数值行的「速」同源）
 show_count = false            # 右列的人数曲线（数据一直在，默认不占格子）
-show_trails = true            # 3D 视图要不要画运动轨迹（关掉只影响显示）
 
 [pose3d]
 # 单目 3D 骨架：yolo26*-depth 给 17 个关键点补一个 z，rerun 右下角开个小窗画 3D
@@ -104,8 +103,8 @@ warning: 未知配置项 [rerun].enable，已忽略
 命令行覆盖（`--help` 有全部）：`--serial --index --camera-fps --exposure-us --gain-db
 --brightness --exposure-start-us --exposure-fps-headroom --read-timeout-ms --feature
 --weights --conf --imgsz --device --kpt-conf --detect-hz --duration --max-frames --save-dir
---rerun/--no-rerun --rerun-save --show-values/--no-show-values --show-coords --show-count
---show-trails/--no-show-trails
+--rerun/--no-rerun --rerun-save --show-values/--no-show-values --show-speed --show-count
+--show-speed/--no-show-speed
 --track-iou-threshold --track-match-max-distance --track-max-missed --track-trail-length
 --world/--no-world --world-height --world-pitch --world-yaw --world-roll --world-view
 --jsonl --output-hz`。收到命令行没给的项一律保留配置文件/兜底值，所以
@@ -327,11 +326,10 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 | `person/events` | 人数变化日志（带各框置信度） |
 | `camera/pose3d/joints` | 仅 pose+pose3d：3D 关键点 `Points3D`（相机坐标，米） |
 | `camera/pose3d/skeleton` | 仅 pose+pose3d：3D 骨架 `LineStrips3D` |
-| `camera/pose3d/trails` | 每个人的运动轨迹 `LineStrips3D`（按 `trail_interval` 采样；`show_trails` 控制） |
 | `camera/pose3d/positions` | 每个人的 3D 位置球，标签 = `#id 距离 · 地面速度` |
 | `world/...` | 开了 `[world]` 才有：骨架/轨迹/位置的世界系副本（`RIGHT_HAND_Z_UP`） |
 | `person/values` | 每人一行的极简数值（距/速/状态/有效关节），右列顶部 |
-| `person/coords/<id>/{x,y,z}` | 每个人的坐标曲线（相机系，米；`show_coords` 控制） |
+| `person/metrics/<组>/<指标>/<id>` | 每个人的指标曲线（`person/metrics/speed/speed/<id>` 速度；颜色与图例名由 id 决定） |
 
 ### 单目 3D 骨架（右下角小窗）
 
@@ -391,8 +389,8 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
   预测（框留着、2D 关键点不再画），所以短时间被遮挡的人不会丢 id，也不会在曲线里被数两遍。
 * **单个关键点**连续丢 `max_missed_kpt` 帧后不再画，人的其他部位继续画。
 * **轨迹**按 `trail_interval` 限流记录，最多 `trail_length` 个点（0 = 不留）。
-  只是不想在画面上看到轨迹就用 `[rerun].show_trails = false`（或 `--no-show-trails`）：
-  它只关显示，跟踪里的轨迹点照旧在记，JSONL 与坐标曲线不受影响。
+  轨迹**不画到画面上**：3D 视图只给位置球与骨架，想另做用处直接读 `person.trail`
+  （跟踪器一直在维护它，JSONL 里没有这一项）。
 * **速度**优先取位置卡尔曼的速度状态，再走一道指数平滑（`speed_smoothing`）：
   单目深度抖动大，不平滑就会看到速度在 0 和 1 之间乱跳。`speed_ground` 是沿**上方向**的
   垂直分量之外的部分，"人走多快"看它；低于 `speed_deadband` 显示"静止"。

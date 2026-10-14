@@ -145,11 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖 [rerun].show_values：右列要不要「每人一行」的数值行",
     )
     p.add_argument(
-        "--show-coords",
-        dest="rerun_show_coords",
+        "--show-speed",
+        dest="rerun_show_speed",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="覆盖 [rerun].show_coords：右列要不要每人 x/y/z 坐标曲线",
+        help="覆盖 [rerun].show_speed：右列要不要每人一条速度曲线",
     )
     p.add_argument(
         "--show-count",
@@ -157,13 +157,6 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="覆盖 [rerun].show_count：右列要不要人数曲线（默认不上）",
-    )
-    p.add_argument(
-        "--show-trails",
-        dest="rerun_show_trails",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="覆盖 [rerun].show_trails：3D 视图要不要运动轨迹（默认画）",
     )
 
     pose3d_group = p.add_mutually_exclusive_group()
@@ -382,9 +375,8 @@ def main(argv: list[str] | None = None) -> int:
             show_pose3d=settings.pose3d_enabled,
             show_depth=settings.pose3d_enabled and settings.pose3d_depth_view,
             show_values=settings.rerun_show_values,
-            show_coords=settings.rerun_show_coords,
+            show_speed=settings.rerun_show_speed,
             show_count=settings.rerun_show_count,
-            show_trails=settings.rerun_show_trails,
             world=world,
             show_world_view=settings.world_view,
             eye=settings.pose3d_eye,

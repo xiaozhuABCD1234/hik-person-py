@@ -102,14 +102,12 @@ jpeg_quality = 75
 # viewer 的端口；被占用时 rerun 会直接拿来用。
 port = 9876
 
-# 右列放什么。数值行 = 每人一行短文本（距/速/状态/有效关节），坐标 = 每人 x/y/z 曲线。
-# 人数曲线默认不上（数据一直在，只是不占格子），要看就 show_count = true。
+# 右列放什么。数值行 = 每人一行短文本（距/速/状态/有效关节），速度 = 每人一条曲线
+# （与数值行的「速」同源）。人数曲线默认不上（数据一直在，只是不占格子），
+# 要看就 show_count = true。轨迹不再画到画面上（tracker 仍记录，见 [track].trail_*）。
 show_values = true
-show_coords = true
+show_speed = true
 show_count = false
-# 3D 视图里要不要画运动轨迹。关掉的只是显示，轨迹记录本身由 [track] 管
-# （要连记录一起停掉就 trail_length = 0）。
-show_trails = true
 
 [pose3d]
 # 单目 3D 骨架：yolo26*-depth 给 pose 的 17 个关键点补一个 z，在 rerun 右下角
