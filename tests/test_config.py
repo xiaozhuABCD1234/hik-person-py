@@ -42,6 +42,7 @@ exposure_us = 3500
 gain_db = 0
 brightness = 120.5
 auto_gain_max_db = 6.0
+exposure_start_us = 7000
 exposure_mode = "manual"
 exposure_fps_headroom = 0.8
 read_timeout_ms = 500
@@ -77,6 +78,7 @@ save = "/tmp/out.rrd"
     assert settings.gain_db == 0.0  # 0 dB 是合法值，不能退化
     assert settings.brightness == 120.5
     assert settings.auto_gain_max_db == 6.0
+    assert settings.exposure_start_us == 7000.0  # 整数写成浮点
     assert settings.exposure_mode == "manual"
     assert settings.exposure_fps_headroom == 0.8
     assert settings.read_timeout_ms == 500
@@ -148,6 +150,17 @@ def test_cli_can_set_gain_to_zero() -> None:
     """0 是合法增益，不能被当成"没给"。"""
     settings = apply_cli(Settings(gain_db=-1.0), make_args(gain_db=0.0))
     assert settings.gain_db == 0.0
+
+
+def test_cli_can_set_ae_start_point() -> None:
+    settings = apply_cli(Settings(exposure_start_us=8000.0), make_args(exposure_start_us=2500.0))
+    assert settings.exposure_start_us == 2500.0
+
+
+def test_cli_can_disable_ae_start_point_with_zero() -> None:
+    """0 = 不重置（用相机现存值），也不能被当成"没给"。"""
+    settings = apply_cli(Settings(exposure_start_us=8000.0), make_args(exposure_start_us=0.0))
+    assert settings.exposure_start_us == 0.0
 
 
 def test_cli_can_disable_rerun() -> None:

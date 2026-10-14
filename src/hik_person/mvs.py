@@ -387,6 +387,7 @@ class Camera:
         auto_brightness: float | None = None,
         auto_exposure_upper_us: float | None = None,
         auto_gain_upper_db: float | None = None,
+        exposure_start_us: float | None = None,
         bayer_quality: int = 1,
         grab_strategy: str = "LatestImagesOnly",
         buffer_count: int = 3,
@@ -400,6 +401,9 @@ class Camera:
 
         ``exposure_auto``/``gain_auto`` 设成 "Continuous" 就是用相机自己的自动
         曝光/增益；此时 ``auto_*`` 三个参数交给相机：目标灰度、曝光上限、增益上限。
+        ``exposure_start_us`` 是 AE 的**起点**：相机自己记着上次的曝光/增益（换相机、
+        或别人用 MVS 客户端动过之后，起跑线都不一样），给了这个值就先关自动、把曝光
+        钉到它，再开 Continuous，保证每轮从同一个起点开始。0/None = 不重置。
         注意这三个特性的类型不一样（写错会拿到 0x80000109，像是不支持）：
 
         ============================  ======  ====================================
@@ -422,6 +426,26 @@ class Camera:
 
         auto_exposure_on = bool(exposure_auto) and exposure_auto != "Off"
         auto_gain_on = bool(gain_auto) and gain_auto != "Off"
+
+        # AE 起点：相机把上次的曝光/增益存在自己身上，谁用过这台相机都会影响起跑线
+        # （实测刚开 Continuous 时读到的几百 us 就是半路值）。先把自动关掉、把曝光
+        # 钉到已知值，再开 Continuous，起点就固定了。顺序不能反：开着自动时相机
+        # 拒绝写固定值。
+        if auto_exposure_on and exposure_start_us and exposure_start_us > 0:
+            hard(
+                cam.MV_CC_SetEnumValueByString("ExposureAuto", "Off"),
+                "ExposureAuto(起点)",
+            )
+            if auto_gain_on:
+                hard(
+                    cam.MV_CC_SetEnumValueByString("GainAuto", "Off"),
+                    "GainAuto(起点)",
+                )
+            hard(
+                cam.MV_CC_SetFloatValue("ExposureTime", float(exposure_start_us)),
+                "ExposureTime(起点)",
+            )
+            self.notes.append(f"AE 起点: 先把曝光钉到 {exposure_start_us:g} us，再开自动曝光/增益")
 
         # 自动曝光/增益交给相机自己做（Continuous）：它按自己的测光取目标灰度，
         # 比自己量灰度再反算稳得多。写了自动就不能再写固定值，相机会拒绝。
@@ -627,8 +651,45 @@ class Camera:
             raise MvsError(f"MV_CC_StartGrabbing failed: 0x{ret & 0xFFFFFFFF:08x}")
 
     # ------------------------------------------------------------ 曝光/增益
+    def wait_auto_settled(
+        self,
+        *,
+        max_frames: int = 120,
+        stable_frames: int = 8,
+        rel_tol: float = 0.01,
+    ) -> tuple[dict, bool]:
+        """取帧等相机自己的 AE 收敛；返回 ``(参数读数, 是否收敛)``。
+
+        AE 是逐帧爬的：刚开 ``Continuous`` 时读到的曝光只是起点或半路值（实测从
+        几百 us 爬到上限要几十帧），所以“开完就读”会打印出一个没意义的数字。
+        这里一边取帧一边看 ``ExposureTime``/``Gain`` 还动不动：连续 ``stable_frames``
+        帧的相对变化都在 ``rel_tol``（曝光）/``0.05 dB``（增益）内就认为收敛；
+        等满 ``max_frames`` 帧还不稳就返回未收敛，让调用方自己决定怎么说。
+        """
+        prev: tuple[float, float] | None = None
+        stable = 0
+        for _ in range(max_frames):
+            self.read()
+            cur = self.settings()
+            now = (cur["exposure_us"], cur["gain_db"])
+            moved = (
+                prev is None
+                or abs(now[0] - prev[0]) > rel_tol * max(abs(prev[0]), 1.0)
+                or abs(now[1] - prev[1]) > 0.05
+            )
+            stable = 0 if moved else stable + 1
+            if stable >= stable_frames:
+                return cur, True
+            prev = now
+        return self.settings(), False
+
     def read(self, timeout_ms: int = 1000) -> Frame | None:
-        """取一帧（含 SDK 转 BGR8）；没有数据返回 None。"""
+        """取一帧（含 SDK 转 BGR8）；没有数据返回 None。
+
+        注意 ``Frame.exposure_us``/``gain_db`` 来自帧头元数据（``fExposureTime``/
+        ``fGain``），**有些机型恒为 0**（实测 MV-CS016-10UC），别拿它判断当前曝光；
+        要读当前值用 ``settings()``（读节点）。
+        """
         sdk = self.sdk
         out = sdk.MV_FRAME_OUT()
         memset(byref(out), 0, sizeof(out))

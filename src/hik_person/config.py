@@ -38,6 +38,9 @@ class Settings:
     # -1 = 不动它（用相机当前值），0 = 不允许增益。
     auto_gain_max_db: float = 16.98
     brightness: float = 110.0
+    # sdk 模式下开 AE 前先把曝光钉到这个值当起点（us）；0 = 不重置（用相机现存值）。
+    # 相机把上次的曝光存在自己身上，换相机或别人用过之后 AE 的起跑线不一样。
+    exposure_start_us: float = 8000.0
     exposure_fps_headroom: float = 0.9
     read_timeout_ms: int = 1000
     feature: list[str] = field(default_factory=list)
@@ -106,6 +109,7 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("camera", "exposure_us"): "exposure_us",
     ("camera", "gain_db"): "gain_db",
     ("camera", "brightness"): "brightness",
+    ("camera", "exposure_start_us"): "exposure_start_us",
     ("camera", "exposure_fps_headroom"): "exposure_fps_headroom",
     ("camera", "read_timeout_ms"): "read_timeout_ms",
     ("camera", "feature"): "feature",

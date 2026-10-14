@@ -29,6 +29,7 @@ camera_fps = 30.0             # 采集帧率上限
 exposure_mode = "sdk"         # sdk = 相机自动曝光/增益；manual = 用下面的固定值
 brightness = 110.0            # AE 目标灰度（写进相机的 Brightness 特性）
 auto_gain_max_db = 16.98      # AE 允许的最大增益
+exposure_start_us = 8000.0    # 开 AE 前先钉住的曝光起点（0 = 用相机现存值）
 exposure_us = 8000.0          # manual 模式：0 = 用设备当前值
 gain_db = -1.0                # manual 模式：-1 = 用设备当前值（0 dB 是合法最小值）
 feature = ["ADCBitDepth=Bits_8"]   # 任意 GenICam 特性（写别的机型的符号名也会自动改写）
@@ -75,7 +76,7 @@ warning: 未知配置项 [rerun].enable，已忽略
 ```
 
 命令行覆盖（`--help` 有全部）：`--serial --index --camera-fps --exposure-us --gain-db
---brightness --brightness-tolerance --exposure-fps-headroom --read-timeout-ms --feature
+--brightness --exposure-start-us --exposure-fps-headroom --read-timeout-ms --feature
 --weights --conf --iou --imgsz --device --detect-hz --duration --max-frames --save-dir
 --rerun/--no-rerun --rerun-save`。收到命令行没给的项一律保留配置文件/兜底值，所以
 `--gain-db 0` 和"没给增益"是两件事。
@@ -197,6 +198,12 @@ camera: ... exposure_us=23140.0, gain_db=0.0, resulting_fps=30.0
   既让 AE 有足够的调亮余地，又不会把帧率悄悄带下去。
 * 想自己上手动值就用 `exposure_mode = "manual"` + `exposure_us` / `gain_db`。
 * **相机会记住上次的曝光/增益**（存在相机里，不随进程退出丢），换进程不一定回到同一状态。
+  所以 `sdk` 模式下会先把自动关掉、把曝光钉到 `exposure_start_us`（默认 8000 us），
+  再开 `Continuous` —— 换相机、或别人用 MVS 客户端动过这台相机，每轮的起跑线也一样。
+  `exposure_start_us = 0` = 不重置，用相机现存值。
+* 启动时那行 `-> 曝光 …` 是**等 AE 收敛后**才读的（连续几帧不动才算稳）：AE 是逐帧
+  爬的，刚开 `Continuous` 就读会得到一个没意义的半路值（实测换相机后读到过 2697 us，
+  而它实际一路爬到了 15000 us 上限）；等满帧数还不稳会标「未收敛」。
 
 踩过的坑（都跟错类型有关，写错时 SDK 只给一个 `0x80000109`，看着像“不支持”）：
 

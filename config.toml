@@ -28,6 +28,11 @@ brightness = 110.0
 # -1 = 不动它（用相机当前值）。
 auto_gain_max_db = 16.98
 
+# AE 的起点：开自动前先把曝光钉到这个值（us），0 = 不重置（用相机现存值）。
+# 相机把上次的曝光/增益存在自己身上，换相机、或别人用 MVS 客户端动过之后起跑线
+# 就不一样（实测刚开 Continuous 时读到的几百 us 只是半路值），钉一下每轮起点一致。
+exposure_start_us = 8000.0
+
 # AE 的曝光上限 = exposure_fps_headroom / camera_fps（秒）：既能调亮又不拖累帧率。
 # 踩过的坑：这台相机 AutoExposureTimeUpperLimit 出厂只有 3828 us，AE 被卡在这个
 # 天花板里，于是只能把增益拉到 16.98 dB（设备上限 = 满噪点）而画面仍然很暗。

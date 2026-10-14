@@ -69,6 +69,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--brightness", type=float, default=None, help="覆盖 [camera].brightness（AE 目标灰度）"
     )
     p.add_argument("--auto-gain-max-db", type=float, default=None)
+    p.add_argument(
+        "--exposure-start-us",
+        type=float,
+        default=None,
+        help="覆盖 [camera].exposure_start_us：开 AE 前先钉住的曝光起点（0 = 用相机现存值）",
+    )
     p.add_argument("--exposure-fps-headroom", type=float, default=None)
     p.add_argument("--read-timeout-ms", type=int, default=None)
     p.add_argument(
@@ -369,6 +375,7 @@ def main(argv: list[str] | None = None) -> int:
                 auto_brightness=settings.brightness if auto and settings.brightness > 0 else None,
                 auto_exposure_upper_us=auto_exposure_upper if auto else None,
                 auto_gain_upper_db=settings.auto_gain_max_db if auto else None,
+                exposure_start_us=settings.exposure_start_us if auto else None,
                 feature_overrides=settings.feature,
             )
             for item in cam.applied_features:
@@ -386,11 +393,11 @@ def main(argv: list[str] | None = None) -> int:
                     if auto_exposure_upper is not None
                     else "曝光/增益: 相机自动"
                 )
-                for _ in range(10):
-                    cam.read()
-                settled = cam.settings()
+                settled, converged = cam.wait_auto_settled()
+                tail = "" if converged else "（还在变，未收敛）"
                 print(
-                    f"  -> 曝光 {settled['exposure_us']:.0f} us，增益 {settled['gain_db']:.2f} dB"
+                    f"  -> 曝光 {settled['exposure_us']:.0f} us，"
+                    f"增益 {settled['gain_db']:.2f} dB{tail}"
                 )
             elif settings.exposure_mode == "manual":
                 print(f"曝光/增益: 固定 {settings.exposure_us:.0f} us / {settings.gain_db:g} dB")
