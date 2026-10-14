@@ -37,6 +37,19 @@ def person_record(person, world: CameraToWorld | None = None) -> dict:
         ),
         "state": person.state,
         "velocity": [round(float(v), 4) for v in person.velocity],
+        # 摔倒状态：level 0 正常 / 1 疑似（有冲击、正在倒地）/ 2 摔倒（报警）
+        "fall": {
+            "level": int(getattr(person, "fall_level", 0)),
+            "state": getattr(person, "fall_state", ""),
+            "lying": bool(getattr(person, "lying", False)),
+            "since": getattr(person, "fall_since", None),
+        },
+        # 指标（只含本帧真有的键）：speed / speed_ground / fall_level / torso_angle
+        "metrics": {
+            key: round(float(value), 4)
+            for key, value in person.metrics.items()
+            if np.isfinite(value)
+        },
         "box": [round(float(v), 2) for v in person.box],
         "valid_keypoints": int(person.valid_count),
         "coverage": round(float(person.coverage), 4),

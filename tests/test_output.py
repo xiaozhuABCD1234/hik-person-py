@@ -50,6 +50,18 @@ def test_record_has_the_documented_fields() -> None:
     assert record["coverage"] == pytest.approx(14 / 17, abs=1e-4)  # 写盘时四舍五入
 
 
+def test_record_carries_fall_state_and_metrics() -> None:
+    """摔倒状态与指标（速度/夹角/等级）要一起出去，缺项的键不出现。"""
+    item = person()
+    item.metrics = {"speed": 0.41, "speed_ground": 0.41, "fall_level": 2.0, "torso_angle": 88.6}
+    item.fall_level, item.fall_state, item.fall_since, item.lying = 2, "摔倒", 12.5, True
+    record = person_record(item)
+    assert record["fall"] == {"level": 2, "state": "摔倒", "lying": True, "since": 12.5}
+    assert record["metrics"]["torso_angle"] == 88.6
+    assert record["metrics"]["fall_level"] == 2.0
+    assert json.loads(json.dumps(record, ensure_ascii=False))["fall"]["level"] == 2
+
+
 def test_record_is_json_serializable() -> None:
     """必须是纯 JSON：numpy 标量漏出来 json.dumps 就炸。"""
     text = json.dumps(person_record(person()), ensure_ascii=False)

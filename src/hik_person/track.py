@@ -14,8 +14,12 @@
 让轨迹不至于一格一格地跳。
 
 和 d435i-person-py 的差别：那边的人体指标（身高/肩宽/步态）建立在真深度上，这里
-**只用相对量** —— 速度（含朝上方向的分解）、运动状态、有效关节数。单目估计的绝对尺度
-会飘，距离与速度只能当"同一次运行内可比"的参考。没有外部依赖（不用 scipy 的匈牙利算法）。
+**只用相对量** —— 速度（含朝上方向的分解）、运动状态、躯干夹角、摔倒等级、有效关节数。
+单目估计的绝对尺度会飘，距离与速度只能当"同一次运行内可比"的参考。
+
+摔倒检测（``fall.py`` 的三步状态机）挂在同一条轨迹上：信号取"躯干中心沿上方向的高度 +
+竖直速度 + 躯干夹角"，所以报警与曲线用的是同一份量。没有外部依赖
+（不用 scipy 的匈牙利算法）。
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .fall import FallConfig, FallDetector, torso_angle
 from .geometry import Intrinsics, depth_valid_mask, lift_keypoints
 from .pose import KEYPOINT_NAMES_17, PoseInstance
 from .pose3d import person_position, to_display
@@ -105,6 +110,12 @@ class TrackedPerson:
     missed: int  # 最近连续漏检帧数（0 = 本帧命中了）
     valid_count: int  # 本帧有效关键点个数
     state_speed: float = 0.15  # 状态标签阈值：低于它显示"静止"
+    # 本帧的指标（只含真有的项）：speed / speed_ground / fall_level / torso_angle…
+    metrics: dict[str, float] = field(default_factory=dict)
+    fall_level: int = 0  # 0 正常 / 1 疑似（有冲击、正在倒地）/ 2 摔倒（报警）
+    fall_state: str = ""  # 摔倒状态的中文短标签（正常时为空串）
+    fall_since: float | None = None  # 当前状态的起始时刻（报警后就是摔倒发生的时间）
+    lying: bool = False  # 本帧是不是躺倒姿态（配 fall_level=1 就是在"倒地"过程中）
 
     @property
     def distance(self) -> float:
@@ -151,12 +162,23 @@ class _Track:
     speed_ground: float = 0.0
     prev_position: np.ndarray = field(default_factory=lambda: np.full(3, np.nan, np.float32))
     prev_t: float = 0.0
+    fall: FallDetector = field(default_factory=FallDetector)
     missed: int = 0
     age: int = 0
     last_t: float = 0.0
     last_trail_t: float = -1e9
     trail: deque = field(default_factory=deque)
     raw: np.ndarray | None = None  # 最近一次观测（kalman 关掉时直接用它）
+
+
+def _joint(joints, names, name: str) -> np.ndarray | None:
+    """从``(M,3)``关节 + 名字列表里按名字取一个点；缺/非有限就 None。"""
+    points = np.asarray(joints)
+    keys = list(names)
+    if name not in keys or not len(points):
+        return None
+    point = np.asarray(points[keys.index(name)], dtype=np.float64)
+    return point if point.shape == (3,) and np.isfinite(point).all() else None
 
 
 class PersonTracker:
@@ -177,6 +199,7 @@ class PersonTracker:
         speed_smoothing: float = 0.3,
         speed_deadband: float = 0.15,
         up: tuple[float, float, float] = DEFAULT_UP,
+        fall: FallConfig | None = None,
     ):
         self.kalman = bool(kalman)
         self.q = float(process_noise)
@@ -191,6 +214,8 @@ class PersonTracker:
         self.speed_smoothing = float(speed_smoothing)
         self.speed_deadband = float(speed_deadband)
         self.up = np.asarray(up, dtype=np.float64)
+        # 摔倒判据：默认开（安全类功能不该因为"不看尺寸"就没了）
+        self.fall = fall or FallConfig()
         self.tracks: list[_Track] = []
         self._next_id = 1
 
@@ -250,6 +275,7 @@ class PersonTracker:
             pos_initialized=initialized,
             prev_position=np.asarray(position, dtype=np.float32).copy(),
             prev_t=t,
+            fall=FallDetector(self.fall),
             missed=0,
             age=1,
             last_t=t,
@@ -353,7 +379,7 @@ class PersonTracker:
             return np.full(3, np.nan, dtype=np.float32)
         return np.array([filt.position for filt in track.pos_filters], dtype=np.float32)
 
-    def _display(self, track: _Track, raw_position: np.ndarray) -> TrackedPerson:
+    def _display(self, track: _Track, raw_position: np.ndarray, t: float) -> TrackedPerson:
         show = track.seen & (track.missed_kpt <= self.max_missed_kpt)
         if self.kalman:
             points = np.full((NUM_KP, 3), np.nan, dtype=np.float32)
@@ -388,7 +414,55 @@ class PersonTracker:
             missed=track.missed,
             valid_count=int(np.count_nonzero(show)),
             state_speed=self.speed_deadband,
+            metrics=self._metrics(track, joints, names, position, t),
+            fall_level=track.fall.level,
+            fall_state=track.fall.state_name,
+            fall_since=track.fall.since,
+            lying=track.fall.lying,
         )
+
+    def _metrics(
+        self, track: _Track, joints, names, position: np.ndarray, t: float
+    ) -> dict[str, float]:
+        """本帧的指标：速度 + 摔倒（躯干夹角/等级）。缺项的不出键。
+
+        单目方案只出相对量：速度、夹角、状态、有效关节数；身高/肩宽这类绝对长度不出。
+        """
+        out: dict[str, float] = {}
+        out.update(self._update_fall(track, joints, names, position, t))
+        if np.isfinite(track.speed):
+            out["speed"] = float(track.speed)
+        if np.isfinite(track.speed_ground):
+            out["speed_ground"] = float(track.speed_ground)
+        return out
+
+    def _update_fall(self, track: _Track, joints, names, position, t: float) -> dict[str, float]:
+        """跑一帧摔倒状态机，返回要记录的两个量（torso_angle / fall_level）。
+
+        信号：高度 = 躯干中心沿"上"方向的分量（双髋中点），竖直速度 = 位置卡尔曼的
+        速度状态向"上"投影，夹角 = 肩中点-髋中点连线与"上"方向的夹角。躺着时关键点
+        常被遮，所以角度测不到就给 nan，靠"高度低得多"兜底。
+        """
+        detector = track.fall
+        if not detector.config.enabled:
+            return {}
+        hip = _joint(joints, names, "left_hip")
+        hip_r = _joint(joints, names, "right_hip")
+        shoulder = _joint(joints, names, "left_shoulder")
+        shoulder_r = _joint(joints, names, "right_shoulder")
+        angle = float("nan")
+        if all(point is not None for point in (hip, hip_r, shoulder, shoulder_r)):
+            torso = (shoulder + shoulder_r) * 0.5 - (hip + hip_r) * 0.5
+            angle = torso_angle(torso, self.up)
+        height = float("nan")
+        if position is not None and np.isfinite(position).all():
+            height = float(np.asarray(position, np.float64) @ self.up)
+        v_down = -float(np.asarray(track.velocity, np.float64) @ self.up)
+        detector.update(t, height=height, v_down=v_down, angle=angle)
+        out: dict[str, float] = {"fall_level": float(detector.level)}
+        if np.isfinite(detector.angle):
+            out["torso_angle"] = float(detector.angle)
+        return out
 
     # ------------------------------------------------------------------ 入口
     def update(
@@ -455,6 +529,6 @@ class PersonTracker:
         empty = np.full(3, np.nan, dtype=np.float32)
 
         self.tracks = [track for track in self.tracks if track.missed <= self.max_missed]
-        out = [self._display(track, raw_by_id.get(track.id, empty)) for track in self.tracks]
+        out = [self._display(track, raw_by_id.get(track.id, empty), t) for track in self.tracks]
         out.sort(key=lambda person: person.id)
         return out

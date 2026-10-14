@@ -27,7 +27,8 @@ EXPOSURE_MODES: tuple[str, ...] = ("sdk", "manual")
 REMOVED_KEYS: dict[tuple[str, str], str] = {
     ("detector", "task"): "现在只有 pose 一条线（关键点/骨架），删掉这一行",
     ("detector", "iou"): "pose 线不用 NMS 的 iou 参数（用 ultralytics 默认值），删掉这一行",
-    ("rerun", "show_coords"): "右列改画速度曲线了，这一项现在叫 show_speed",
+    ("rerun", "show_coords"): "右列改画指标曲线了（速度/摔倒），这一项现在叫 show_metrics",
+    ("rerun", "show_speed"): "右列现在是一组指标曲线（速度+摔倒），这一项改叫 show_metrics",
     ("rerun", "show_trails"): "轨迹已不再画到画面上（tracker 仍在记，见 [track].trail_*）",
 }
 
@@ -83,12 +84,15 @@ class Settings:
     rerun_memory_limit: str = "512MB"
     # 与 viewer 同进程的 gRPC 缓冲（给后到的 viewer 补数据用）
     rerun_server_memory_limit: str = "512MB"
+    # 摔倒报警灯的闪烁频率（Hz）：红灯明暗交替；0 = 常亮。
+    rerun_fall_light_flash: float = 2.0
     # 图像送进 viewer 前先压成 JPEG；0 = 原图（4.67 MB/帧，viewer 内存约差 10 倍）
     rerun_jpeg_quality: int = 75
     rerun_port: int = 9876
-    # 右列放什么：数值行（每人一行）/ 速度曲线 / 人数曲线。默认前两个，人数默认不上。
+    # 右列放什么：数值行（每人一行）/ 指标曲线（速度、摔倒）/ 人数曲线。
+    # 默认前两个，人数默认不上。
     rerun_show_values: bool = True
-    rerun_show_speed: bool = True
+    rerun_show_metrics: bool = True
     rerun_show_count: bool = False
 
     # ---------------------------------------------------------------- [pose3d]
@@ -129,6 +133,20 @@ class Settings:
     # 速度指数平滑时间常数（秒），0 = 不平滑；死区只影响显示状态（静止/行走）。
     track_speed_smoothing: float = 0.3
     track_speed_deadband: float = 0.15
+
+    # ---------------------------------------------------------------- [fall]
+    # 摔倒检测（见 fall.py）：三步判据（冲击 -> 躺倒 -> 持续），缺一步都不报警。
+    # 米制阈值都建立在单目估计深度上，是"估计尺度"下的经验值，调参请看速度/夹角曲线。
+    fall_enabled: bool = True
+    fall_impact_speed: float = 1.0  # m/s：向下速度超过它算冲击
+    fall_drop_height: float = 0.35  # m：窗口内从高点掉这么多也算冲击
+    fall_impact_window: float = 0.7  # s：下沉判据的时间窗口
+    fall_lying_angle: float = 60.0  # 度：躯干与"上"方向夹角超过它算躺倒
+    fall_lying_height: float = 0.35  # m：低于站立参考这么多也算躺倒（角度被遮时兜底）
+    fall_lying_time: float = 1.2  # s：躺倒连续保持多久才确认报警
+    fall_confirm_window: float = 3.0  # s：冲击后多久内确认有效，超时当没事
+    fall_recover_angle: float = 35.0  # 度：恢复到直立
+    fall_recover_time: float = 1.0  # s：直立保持多久才解除报警
 
     # ---------------------------------------------------------------- [world]
     # 相机坐标系 -> 世界（地面）系的静态外参。默认关：不量安装高度/俯仰角时
@@ -183,8 +201,9 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("rerun", "jpeg_quality"): "rerun_jpeg_quality",
     ("rerun", "port"): "rerun_port",
     ("rerun", "show_values"): "rerun_show_values",
-    ("rerun", "show_speed"): "rerun_show_speed",
+    ("rerun", "show_metrics"): "rerun_show_metrics",
     ("rerun", "show_count"): "rerun_show_count",
+    ("rerun", "fall_light_flash"): "rerun_fall_light_flash",
     ("pose3d", "enabled"): "pose3d_enabled",
     ("pose3d", "weights"): "pose3d_weights",
     ("pose3d", "imgsz"): "pose3d_imgsz",
@@ -205,6 +224,16 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("track", "trail_interval"): "track_trail_interval",
     ("track", "speed_smoothing"): "track_speed_smoothing",
     ("track", "speed_deadband"): "track_speed_deadband",
+    ("fall", "enabled"): "fall_enabled",
+    ("fall", "impact_speed"): "fall_impact_speed",
+    ("fall", "drop_height"): "fall_drop_height",
+    ("fall", "impact_window"): "fall_impact_window",
+    ("fall", "lying_angle"): "fall_lying_angle",
+    ("fall", "lying_height"): "fall_lying_height",
+    ("fall", "lying_time"): "fall_lying_time",
+    ("fall", "confirm_window"): "fall_confirm_window",
+    ("fall", "recover_angle"): "fall_recover_angle",
+    ("fall", "recover_time"): "fall_recover_time",
     ("world", "enabled"): "world_enabled",
     ("world", "height"): "world_height",
     ("world", "pitch_deg"): "world_pitch_deg",

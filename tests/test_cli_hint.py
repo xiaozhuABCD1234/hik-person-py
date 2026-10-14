@@ -14,6 +14,15 @@ NON_SETTING_DESTS = {"config", "show_config", "list", "help"}
 # 只在 config.toml 里给、故意不给命令行开关的字段。加新字段时要么补开关，
 # 要么把它加到这里 —— 免得又出现"命令行给了值却什么都没发生"。
 CONFIG_ONLY_FIELDS = {
+    "fall_impact_speed",
+    "fall_drop_height",
+    "fall_impact_window",
+    "fall_lying_angle",
+    "fall_lying_height",
+    "fall_lying_time",
+    "fall_confirm_window",
+    "fall_recover_angle",
+    "fall_recover_time",
     "pose3d_eye",
     "pose3d_look_at",
     "pose3d_eye_up",

@@ -17,9 +17,36 @@ import numpy as np
 import pytest
 import rerun as rr
 
+from hik_person.fall import FALLEN, SUSPECT
 from hik_person.track import TrackedPerson
-from hik_person.viz import RerunView, color_for, value_line
+from hik_person.viz import (
+    ALARM_COLOR,
+    LIGHT_COLORS,
+    LIGHT_IDLE_COLOR,
+    RerunView,
+    color_for,
+    fall_alert,
+    fall_alert_panel,
+    fall_light,
+    person_color,
+    value_line,
+)
 from hik_person.world import CameraToWorld
+
+
+def views(node) -> list[tuple[str, str]]:
+    """递归收集 blueprint 里的视图：(类型名, origin)。别猜层级——rerun 的容器会套好几层。"""
+    stack = [getattr(node, "root_container", node)]
+    found: list[tuple[str, str]] = []
+    while stack:
+        current = stack.pop()
+        if hasattr(current, "origin"):
+            found.append((type(current).__name__, current.origin))
+        for child in getattr(current, "contents", None) or []:
+            if child is None or isinstance(child, (str, bytes)):
+                continue
+            stack.append(child)
+    return found
 
 
 def blank(height: int = 1080, width: int = 1440) -> np.ndarray:
@@ -58,6 +85,7 @@ def person(
         age=3,
         missed=missed,
         valid_count=valid,
+        metrics={"speed": 0.2, "speed_ground": 0.2, "fall_level": 0.0},
     )
 
 
@@ -129,29 +157,33 @@ def test_default_logs_static_without_history(monkeypatch: pytest.MonkeyPatch) ->
     assert ("person/count", False) in calls
 
 
-def test_right_column_has_values_and_coords_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """右列默认是「数值行 + 坐标曲线」；人数默认不上（要就 --show-count）。"""
+def test_right_column_has_values_and_metric_curves_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """右列默认是「数值行 + 指标曲线格」；人数默认不上（要就 --show-count）。"""
     sent: list = []
     monkeypatch.setattr(rr, "send_blueprint", lambda bp: sent.append(bp))
 
     v = RerunView(spawn=False)
     v.log_frame(frame(), [])
 
-    right = sent[0].root_container.contents[1]
-    names = [type(child).__name__ for child in right.contents]
-    assert any("TextDocumentView" in n for n in names), names
-    assert any("TimeSeriesView" in n for n in names), names
+    found = views(sent[0])
+    assert ("TextDocumentView", "person/values") in found, found
+    assert ("TimeSeriesView", "person/metrics/speed") in found, found
+    assert ("TimeSeriesView", "person/metrics/fall") in found, found
+    # 没开摔倒检测就没有报警灯那一格
+    assert not [item for item in found if item[1].startswith("person/fall_light")], found
 
 
 def test_count_panel_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     sent: list = []
     monkeypatch.setattr(rr, "send_blueprint", lambda bp: sent.append(bp))
 
-    v = RerunView(spawn=False, show_speed=False, show_count=True)
+    v = RerunView(spawn=False, show_metrics=False, show_count=True)
     v.log_frame(frame(), [])
-    right = sent[0].root_container.contents[1]
-    origins = [child.origin for child in right.contents if "TimeSeriesView" in type(child).__name__]
-    assert "person/count" in origins, origins
+    found = views(sent[0])
+    assert ("TimeSeriesView", "person/count") in found, found
+    assert ("TimeSeriesView", "person/metrics/speed") not in found, found
 
 
 def test_blueprint_has_3d_panel_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -162,10 +194,8 @@ def test_blueprint_has_3d_panel_when_enabled(monkeypatch: pytest.MonkeyPatch) ->
     v = RerunView(spawn=False, show_pose3d=True)
     v.log_frame(frame(), [person()])
 
-    right = sent[0].root_container.contents[1]
-    names = [type(child).__name__ for child in right.contents]
-    assert any("TextDocumentView" in n for n in names), names
-    assert any("Spatial3DView" in n for n in names), names
+    found = views(sent[0])
+    assert ("Spatial3DView", "camera/pose3d") in found, found
 
 
 def test_blueprint_has_no_3d_panel_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -175,9 +205,8 @@ def test_blueprint_has_no_3d_panel_by_default(monkeypatch: pytest.MonkeyPatch) -
     v = RerunView(spawn=False)
     v.log_frame(frame(), [])
 
-    right = sent[0].root_container.contents[1]
-    children = getattr(right, "contents", [])
-    assert not any("3D" in type(child).__name__ for child in children)
+    found = views(sent[0])
+    assert not [item for item in found if "3D" in item[0]], found
 
 
 def test_blueprint_has_depth_panel_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,9 +217,9 @@ def test_blueprint_has_depth_panel_when_enabled(monkeypatch: pytest.MonkeyPatch)
     v = RerunView(spawn=False, show_depth=True)
     v.log_frame(frame(), [])
 
-    left = sent[0].root_container.contents[0]
-    names = [type(child).__name__ for child in left.contents]
-    assert sum("Spatial2DView" in n for n in names) == 2, names
+    found = views(sent[0])
+    origins = {origin for name, origin in found if name == "Spatial2DView"}
+    assert {"camera/image", "camera/depth"} <= origins, found
 
 
 def test_3d_view_pins_the_eye_so_it_does_not_auto_scale(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,9 +229,17 @@ def test_3d_view_pins_the_eye_so_it_does_not_auto_scale(monkeypatch: pytest.Monk
     v = RerunView(spawn=False, show_pose3d=True)
     v.log_frame(frame(), [])
 
-    right = sent[0].root_container.contents[1]
-    view3d = next(c for c in right.contents if "Spatial3DView" in type(c).__name__)
-    assert "EyeControls3D" in view3d.properties
+    stack = [sent[0].root_container]
+    view3d = None
+    while stack:
+        current = stack.pop()
+        for child in getattr(current, "contents", None) or []:
+            if child is None or isinstance(child, (str, bytes)):
+                continue
+            if type(child).__name__ == "Spatial3DView":
+                view3d = child
+            stack.append(child)
+    assert view3d is not None and "EyeControls3D" in view3d.properties
 
 
 # ------------------------------------------------------------------ 3D 与深度
@@ -234,19 +271,143 @@ def test_speed_curve_is_per_person_and_coords_are_gone(monkeypatch: pytest.Monke
 
     entities = [entity for entity, _ in calls]
     # 路径按组分层（与 d435i 的指标命名一致）：person/metrics/<组>/<指标>/<id>
-    assert "person/metrics/speed/speed/2" in entities
-    assert "person/metrics/speed/speed/3" in entities
+    assert "person/metrics/speed/speed_ground/2" in entities
+    assert "person/metrics/speed/speed_ground/3" in entities
     assert not [entity for entity in entities if entity.startswith("person/coords")], entities
     # 曲线要带时间戳（static 的话画不成曲线）
-    assert ("person/metrics/speed/speed/2", False) in calls
+    assert ("person/metrics/speed/speed_ground/2", False) in calls
 
 
-def test_speed_curve_respects_the_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_metric_curves_respect_the_switch(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(rr, "log", lambda entity, data, **kw: calls.append(entity))
 
-    RerunView(spawn=False, show_speed=False).log_frame(frame(), [person()])
+    RerunView(spawn=False, show_metrics=False).log_frame(frame(), [person()])
     assert not [entity for entity in calls if entity.startswith("person/metrics")], calls
+
+
+# ------------------------------------------------------------------ 摔倒显示
+def test_fallen_person_turns_red_and_is_flagged() -> None:
+    """摔倒：整个人换警报色（比"去曲线框里找线"快得多），数值行带 ⚠ 与躯干角。"""
+    item = person()
+    assert person_color(item) == color_for(item.id)
+    assert fall_alert(item) == ""
+
+    item.fall_level, item.lying = SUSPECT, True  # 倒地中（还没确认）
+    assert fall_alert(item) == "倒地中"
+    assert person_color(item) == color_for(item.id)
+
+    item.fall_level, item.lying = SUSPECT, False  # 只是挨了一下冲击（跳、快速蹲下）
+    assert fall_alert(item) == ""
+
+    item.fall_level = FALLEN
+    item.metrics["torso_angle"] = 88.6
+    assert fall_alert(item) == "⚠ 摔倒 89°"
+    assert person_color(item) == ALARM_COLOR
+    assert "⚠ 摔倒" in value_line(item)
+
+
+def test_fall_light_colors_by_level() -> None:
+    """报警灯四档颜色：红=摔倒 / 琥珀=疑似倒地 / 绿=正常 / 暗蓝灰=无人。"""
+    down = person()
+    down.fall_level, down.lying = SUSPECT, True
+    fallen = person(2)
+    fallen.fall_level = FALLEN
+    fallen.fall_state = "摔倒"
+
+    assert fall_light([person()])[0] == LIGHT_COLORS[0]  # 正常：绿
+    assert fall_light([down])[0] == LIGHT_COLORS[SUSPECT]  # 疑似倒地：琥珀
+    assert fall_light([])[0] == LIGHT_IDLE_COLOR  # 无人：暗蓝灰（故意不用绿）
+    color, lines = fall_light([person(3), fallen], now=0.0)
+    assert color == LIGHT_COLORS[FALLEN]  # 有人摔倒就红，与别人是否正常无关
+    assert lines[0].startswith("摔倒 #2")
+    assert "#2" in lines[1]
+
+
+def test_fall_light_flashes_only_when_fallen() -> None:
+    """红灯按 fall_light_flash 明暗交替；正常/疑似不闪（闪的是警报）。"""
+    fallen = person()
+    fallen.fall_level = FALLEN
+    bright, _ = fall_light([fallen], now=0.0)
+    dim, _ = fall_light([fallen], now=0.6)  # 2 Hz -> 亮 0.5 s、暗 0.5 s
+    assert bright == LIGHT_COLORS[FALLEN]
+    assert dim != bright and dim[0] < bright[0]
+    assert fall_light([fallen], now=0.6, flash_hz=0.0)[0] == bright  # 0 = 常亮
+
+    down = person()
+    down.fall_level, down.lying = SUSPECT, True
+    assert fall_light([down], now=0.0)[0] == fall_light([down], now=0.25)[0]
+
+
+def test_fall_alert_panel_states() -> None:
+    """纯文本副本：正常/无人是安静的小字；报警时带躯干角、距离、已多久。"""
+    assert fall_alert_panel([]) == "画面内无人"
+    assert fall_alert_panel([person()]) == "正常"
+
+    item = person()
+    item.metrics["torso_angle"] = 88.6
+    item.fall_level, item.lying, item.fall_since = SUSPECT, True, 10.0
+    down = fall_alert_panel([item], now=12.5)
+    assert down.startswith("# 疑似倒地 #")
+    assert "躯干 89°" in down and "已 2.5 s" in down
+
+    item.fall_level, item.fall_state = FALLEN, "摔倒"
+    alarm = fall_alert_panel(
+        [item], history=[(10.2, "#1 摔倒", "#1 检测到摔倒（躯干 90°）")], now=12.5
+    )
+    assert alarm.startswith("# 摔倒 #")
+    assert "最近：10.2s #1 检测到摔倒（躯干 90°）" in alarm
+    assert "倒地中" not in alarm.split("\n")[1]  # 确认后不再写"倒地中"
+
+
+def test_fall_alarm_cell_is_on_when_fall_detection_is_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """开了摔倒检测：右列格子里有报警灯那一格（2D 视图，锁在色块的 [0,2]² 上）。"""
+    sent: list = []
+    monkeypatch.setattr(rr, "send_blueprint", lambda bp: sent.append(bp))
+
+    v = RerunView(spawn=False, show_fall_alarm=True)
+    v.log_frame(frame(), [person()])
+    found = views(sent[0])
+    assert ("Spatial2DView", "person/fall_light") in found, found
+    assert ("TimeSeriesView", "person/metrics/speed") in found, found
+    assert ("TimeSeriesView", "person/metrics/fall") in found, found
+
+
+def test_alarm_light_entities_are_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        rr, "log", lambda entity, data, **kw: calls.append((entity, kw.get("static", False)))
+    )
+
+    v = RerunView(spawn=False, show_fall_alarm=True)
+    v.log_frame(frame(), [person()])
+    entities = {entity for entity, _ in calls}
+    assert {"person/fall_light/state", "person/fall_light/text"} <= entities
+    # 报警灯的色块是 static 的（每帧重记一次颜色来闪），纯文本副本也是
+    assert all(static for entity, static in calls if entity.startswith("person/fall"))
+
+
+def test_fall_events_are_logged_only_on_transitions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """摔倒状态一变记一条 person/fall 日志，不能每帧都刷。"""
+    calls: list[str] = []
+    monkeypatch.setattr(rr, "log", lambda entity, data, **kw: calls.append(entity))
+
+    v = RerunView(spawn=False, show_fall_alarm=True)
+    item = person()
+    v.log_frame(frame(1), [item])
+    v.log_frame(frame(2), [item])
+    assert calls.count("person/fall") == 0  # 一直正常就不用记
+
+    item.fall_level = FALLEN
+    item.fall_state = "摔倒"
+    v.log_frame(frame(3), [item])
+    v.log_frame(frame(4), [item])
+    assert calls.count("person/fall") == 1  # 跳变那一次
+
+    item.fall_level = 0
+    item.fall_state = ""
+    v.log_frame(frame(5), [item])
+    assert calls.count("person/fall") == 2  # 恢复也记一次
 
 
 def test_log_people3d_with_nobody_clears_the_view(monkeypatch: pytest.MonkeyPatch) -> None:

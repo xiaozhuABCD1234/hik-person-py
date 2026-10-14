@@ -145,11 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖 [rerun].show_values：右列要不要「每人一行」的数值行",
     )
     p.add_argument(
-        "--show-speed",
-        dest="rerun_show_speed",
+        "--show-metrics",
+        dest="rerun_show_metrics",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="覆盖 [rerun].show_speed：右列要不要每人一条速度曲线",
+        help="覆盖 [rerun].show_metrics：右列要不要指标曲线（速度、摔倒）",
     )
     p.add_argument(
         "--show-count",
@@ -261,6 +261,28 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="覆盖 [world].view：右下角再开一个世界系 3D 视图",
+    )
+    fall_group = p.add_mutually_exclusive_group()
+    fall_group.add_argument(
+        "--fall",
+        dest="fall_enabled",
+        action="store_true",
+        default=None,
+        help="覆盖 [fall].enabled=true：开摔倒检测（默认开）",
+    )
+    fall_group.add_argument(
+        "--no-fall",
+        dest="fall_enabled",
+        action="store_false",
+        default=None,
+        help="覆盖 [fall].enabled=false：关掉摔倒检测",
+    )
+    p.add_argument(
+        "--fall-light-flash",
+        dest="rerun_fall_light_flash",
+        type=float,
+        default=None,
+        help="覆盖 [rerun].fall_light_flash：报警灯闪烁频率 Hz（0 = 常亮）",
     )
     p.add_argument(
         "--jsonl",
@@ -375,8 +397,10 @@ def main(argv: list[str] | None = None) -> int:
             show_pose3d=settings.pose3d_enabled,
             show_depth=settings.pose3d_enabled and settings.pose3d_depth_view,
             show_values=settings.rerun_show_values,
-            show_speed=settings.rerun_show_speed,
+            show_metrics=settings.rerun_show_metrics,
             show_count=settings.rerun_show_count,
+            show_fall_alarm=settings.fall_enabled,
+            fall_light_flash=settings.rerun_fall_light_flash,
             world=world,
             show_world_view=settings.world_view,
             eye=settings.pose3d_eye,
@@ -409,6 +433,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if view is not None or jsonl_writer is not None:
         # 跟踪器一直在：开了 3D 就抬 3D，没开就只做 2D 关联（id/轨迹）
+        from .fall import FallConfig
         from .track import PersonTracker
 
         tracker = PersonTracker(
@@ -426,6 +451,18 @@ def main(argv: list[str] | None = None) -> int:
             # 开了 [world] 就用世界系的"上"（镜头俯仰时地面速度才算得准），
             # 否则假定镜头水平（相机 -Y）。
             up=tuple(world.up_in_camera()) if world is not None else (0.0, -1.0, 0.0),
+            fall=FallConfig(
+                enabled=settings.fall_enabled,
+                impact_speed=settings.fall_impact_speed,
+                drop_height=settings.fall_drop_height,
+                impact_window=settings.fall_impact_window,
+                lying_angle=settings.fall_lying_angle,
+                lying_height=settings.fall_lying_height,
+                lying_time=settings.fall_lying_time,
+                confirm_window=settings.fall_confirm_window,
+                recover_angle=settings.fall_recover_angle,
+                recover_time=settings.fall_recover_time,
+            ),
         )
 
     if tracker is not None and settings.pose3d_enabled:
@@ -484,6 +521,13 @@ def main(argv: list[str] | None = None) -> int:
             f"轨迹 {settings.track_trail_length} 点 / {settings.track_trail_interval:g} s"
         )
 
+    if settings.fall_enabled:
+        print(
+            f"fall  : 开（冲击 {settings.fall_impact_speed:g} m/s 或 "
+            f"{settings.fall_drop_height:g} m 下沉，躺倒 "
+            f"{settings.fall_lying_angle:g}°×{settings.fall_lying_time:g} s）；"
+            "单目尺度下的经验阈值，报警灯会闪"
+        )
     if world is not None:
         print(f"world : 开（{world.describe()}），原点在相机正下方的地面点")
         print("        单目估计深度的绝对尺度会飘，世界坐标只适合做相对比较")
