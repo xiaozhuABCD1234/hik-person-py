@@ -28,6 +28,7 @@ from .config import (
     load_settings,
     resolve_path,
 )
+from .geometry import Intrinsics
 from .mvs import (
     Camera,
     MvsError,
@@ -36,6 +37,7 @@ from .mvs import (
     load_sdk,
     parse_feature_spec,
 )
+from .world import CameraToWorld
 
 
 def weights_download_hint(value: str, fallback: str) -> str:
@@ -214,6 +216,59 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="覆盖 [track].trail_length：轨迹点数上限（0 = 不留轨迹）",
     )
+
+    world_group = p.add_mutually_exclusive_group()
+    world_group.add_argument(
+        "--world",
+        dest="world_enabled",
+        action="store_true",
+        default=None,
+        help="覆盖 [world].enabled=true：启用世界系（地面系）坐标",
+    )
+    world_group.add_argument(
+        "--no-world",
+        dest="world_enabled",
+        action="store_false",
+        default=None,
+        help="覆盖 [world].enabled=false：只用相机坐标系（默认）",
+    )
+    p.add_argument(
+        "--world-height",
+        type=float,
+        default=None,
+        help="覆盖 [world].height：光心离地高度（米）",
+    )
+    p.add_argument(
+        "--world-pitch",
+        dest="world_pitch_deg",
+        type=float,
+        default=None,
+        help="覆盖 [world].pitch_deg：镜头下俯角度（度，正 = 向下）",
+    )
+    p.add_argument(
+        "--world-yaw", dest="world_yaw_deg", type=float, default=None, help="覆盖 [world].yaw_deg"
+    )
+    p.add_argument(
+        "--world-roll",
+        dest="world_roll_deg",
+        type=float,
+        default=None,
+        help="覆盖 [world].roll_deg",
+    )
+    p.add_argument(
+        "--world-view",
+        dest="world_view",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="覆盖 [world].view：右下角再开一个世界系 3D 视图",
+    )
+    p.add_argument(
+        "--jsonl",
+        dest="output_jsonl",
+        default=None,
+        help="覆盖 [output].jsonl：把人写成 JSON Lines（追加写，一行一帧）",
+    )
+    p.add_argument("--output-hz", type=float, default=None, help="覆盖 [output].hz")
     return p
 
 
@@ -292,6 +347,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    world = (
+        CameraToWorld(
+            height=settings.world_height,
+            pitch_deg=settings.world_pitch_deg,
+            yaw_deg=settings.world_yaw_deg,
+            roll_deg=settings.world_roll_deg,
+        )
+        if settings.world_enabled
+        else None
+    )
+
     view = None
     if settings.rerun_enabled:
         from .viz import RerunView
@@ -308,6 +374,11 @@ def main(argv: list[str] | None = None) -> int:
             port=settings.rerun_port,
             show_pose3d=settings.pose3d_enabled,
             show_depth=settings.pose3d_enabled and settings.pose3d_depth_view,
+            show_values=settings.rerun_show_values,
+            show_coords=settings.rerun_show_coords,
+            show_count=settings.rerun_show_count,
+            world=world,
+            show_world_view=settings.world_view,
             eye=settings.pose3d_eye,
             look_at=settings.pose3d_look_at,
             eye_up=settings.pose3d_eye_up,
@@ -326,11 +397,18 @@ def main(argv: list[str] | None = None) -> int:
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
 
-    # 单目 3D 骨架（只在 pose + rerun 都在时才有意义）
+    # 单目 3D 骨架：rerun 要看，JSONL 也要写（世界坐标靠它），所以不再只跟 rerun 绑定
     depth_estimator = None
     tracker = None
-    if view is not None:
-        # 跟踪器一直在：开了 3D 就抬真 3D，没开就只做 2D 关联（id/轨迹）
+
+    jsonl_writer = None
+    if settings.output_jsonl:
+        from .output import JsonlWriter
+
+        jsonl_writer = JsonlWriter(resolve_path(settings.output_jsonl), hz=settings.output_hz)
+
+    if view is not None or jsonl_writer is not None:
+        # 跟踪器一直在：开了 3D 就抬 3D，没开就只做 2D 关联（id/轨迹）
         from .track import PersonTracker
 
         tracker = PersonTracker(
@@ -345,11 +423,13 @@ def main(argv: list[str] | None = None) -> int:
             trail_interval=settings.track_trail_interval,
             speed_smoothing=settings.track_speed_smoothing,
             speed_deadband=settings.track_speed_deadband,
+            # 开了 [world] 就用世界系的"上"（镜头俯仰时地面速度才算得准），
+            # 否则假定镜头水平（相机 -Y）。
+            up=tuple(world.up_in_camera()) if world is not None else (0.0, -1.0, 0.0),
         )
 
-    if view is not None and settings.pose3d_enabled:
+    if tracker is not None and settings.pose3d_enabled:
         from .depth import DepthEstimator
-        from .geometry import Intrinsics
 
         depth_path = resolve_path(settings.pose3d_weights)
         if not depth_path.is_file():
@@ -359,7 +439,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"error: 找不到深度权重 {depth_path}（[pose3d].weights = "
                 f"{settings.pose3d_weights!r}）\n{hint}\n"
-                f"       不想用 3D 小窗就加 --no-pose3d",
+                f"       不想用 3D 就加 --no-pose3d",
                 file=sys.stderr,
             )
             return 2
@@ -403,6 +483,12 @@ def main(argv: list[str] | None = None) -> int:
             f"track : 2D 关联（无深度）：iou {settings.track_iou_threshold:g}，"
             f"轨迹 {settings.track_trail_length} 点 / {settings.track_trail_interval:g} s"
         )
+
+    if world is not None:
+        print(f"world : 开（{world.describe()}），原点在相机正下方的地面点")
+        print("        单目估计深度的绝对尺度会飘，世界坐标只适合做相对比较")
+    if jsonl_writer is not None:
+        print(f"JSONL : -> {jsonl_writer.path}（追加写，{settings.output_hz:g} Hz，一行一帧）")
 
     period = 1.0 / max(settings.detect_hz, 0.1)
     # 帧到达时刻正好压在周期边界上时纯靠抖动决定去留，会白丢约一半的帧
@@ -520,6 +606,14 @@ def main(argv: list[str] | None = None) -> int:
                 last_count = count
 
                 now = time.monotonic()
+                if jsonl_writer is not None:
+                    jsonl_writer.maybe_write(
+                        now,
+                        frame_number=frame.frame_number,
+                        device_timestamp_ms=frame.host_timestamp_ms,
+                        people=people,
+                        world=world,
+                    )
                 if save_dir and count and now - t_last_save >= settings.save_min_interval:
                     import cv2
 
@@ -545,6 +639,9 @@ def main(argv: list[str] | None = None) -> int:
     except MvsError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if jsonl_writer is not None:
+            jsonl_writer.close()
 
     elapsed = time.monotonic() - t_start
     print(f"done: {processed} frames / {elapsed:.1f}s ({processed / max(elapsed, 1e-6):.2f} fps)")

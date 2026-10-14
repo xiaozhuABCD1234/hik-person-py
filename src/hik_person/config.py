@@ -128,6 +128,25 @@ class Settings:
     track_speed_smoothing: float = 0.3
     track_speed_deadband: float = 0.15
 
+    # ---------------------------------------------------------------- [world]
+    # 相机坐标系 -> 世界（地面）系的静态外参。默认关：不量安装高度/俯仰角时
+    # 绝对坐标整体是错的，不如不开。开了以后“上方向”也用世界 Z（速度分解更准）。
+    world_enabled: bool = False
+    # 光心离地高度（米）。卷尺量，或把人放到已知距离看深度读数校准。
+    world_height: float = 1.0
+    # 镜头下俯角度（度，正 = 向下）。手机水平仪贴在相机外壳上量，或用已知身高反推。
+    world_pitch_deg: float = 0.0
+    world_yaw_deg: float = 0.0
+    world_roll_deg: float = 0.0
+    # 右下角再开一个世界系 3D 视图（相机系那个照旧）
+    world_view: bool = False
+
+    # --------------------------------------------------------------- [output]
+    # 非空则把人写成 JSON Lines（追加写，一行一帧）。
+    output_jsonl: str = ""
+    # 写 JSONL 的频率（Hz）。跟踪是高频的，日志没必要跟满。
+    output_hz: float = 5.0
+
 
 # (section, key) -> Settings 字段名
 CONFIG_FIELDS: dict[tuple[str, str], str] = {
@@ -184,6 +203,14 @@ CONFIG_FIELDS: dict[tuple[str, str], str] = {
     ("track", "trail_interval"): "track_trail_interval",
     ("track", "speed_smoothing"): "track_speed_smoothing",
     ("track", "speed_deadband"): "track_speed_deadband",
+    ("world", "enabled"): "world_enabled",
+    ("world", "height"): "world_height",
+    ("world", "pitch_deg"): "world_pitch_deg",
+    ("world", "yaw_deg"): "world_yaw_deg",
+    ("world", "roll_deg"): "world_roll_deg",
+    ("world", "view"): "world_view",
+    ("output", "jsonl"): "output_jsonl",
+    ("output", "hz"): "output_hz",
 }
 
 # 命令行能覆盖的字段（argparse 里 default=None 表示"没给"）

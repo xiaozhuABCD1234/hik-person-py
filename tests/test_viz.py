@@ -19,6 +19,7 @@ import rerun as rr
 
 from hik_person.track import TrackedPerson
 from hik_person.viz import RerunView, color_for, value_line
+from hik_person.world import CameraToWorld
 
 
 def blank(height: int = 1080, width: int = 1440) -> np.ndarray:
@@ -235,6 +236,43 @@ def test_log_people3d_with_nobody_clears_the_view(monkeypatch: pytest.MonkeyPatc
     v.log_people3d([])
     entities = {entity for entity, _ in calls}
     assert "camera/pose3d/joints" in entities  # 记一份空的，旧骨架才会消失
+
+
+def test_world_view_logs_a_transformed_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """开了 [world]：世界系那份必须是变换后的坐标，而不是相机系原样。"""
+    captured: dict = {}
+
+    def fake_points3d(positions, **kw):
+        captured.setdefault("positions", []).append(np.asarray(positions))
+        return object()
+
+    monkeypatch.setattr(rr, "Points3D", fake_points3d)
+    monkeypatch.setattr(rr, "log", lambda entity, data, **kw: None)
+
+    world = CameraToWorld(height=1.5)
+    v = RerunView(spawn=False, show_pose3d=True, world=world, show_world_view=True)
+    v.log_people3d([person()])
+
+    # 顺序：相机系关节、相机系位置、世界系关节、世界系位置
+    calls = captured["positions"]
+    assert len(calls) == 4
+    camera_position = calls[1]
+    world_position = calls[3]
+    assert np.allclose(camera_position, [[0.0, 0.0, 2.5]], atol=1e-5)
+    assert np.allclose(
+        world_position, [world.apply(np.array([0.0, 0.0, 2.5], np.float32))], atol=1e-5
+    )
+
+
+def test_world_view_is_off_when_world_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list = []
+    monkeypatch.setattr(rr, "send_blueprint", lambda bp: sent.append(bp))
+
+    v = RerunView(spawn=False, show_pose3d=True, show_world_view=True)
+    v.log_frame(frame(), [])
+    right = sent[0].root_container.contents[1]
+    origins = [c.origin for c in right.contents if hasattr(c, "origin")]
+    assert "world" not in origins, origins
 
 
 def test_log_depth_logs_a_static_depth_image(monkeypatch: pytest.MonkeyPatch) -> None:

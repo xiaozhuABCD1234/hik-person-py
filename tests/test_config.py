@@ -65,6 +65,23 @@ save_min_interval = 2.0
 [rerun]
 enabled = false
 save = "/tmp/out.rrd"
+show_values = false
+show_coords = false
+show_count = true
+
+[track]
+iou_threshold = 0.45
+match_max_distance = 0.8
+trail_length = 50
+
+[world]
+enabled = true
+height = 1.35
+pitch_deg = 20.0
+
+[output]
+jsonl = "/tmp/people.jsonl"
+hz = 2.0
 """,
     )
     settings, warnings = load_settings(path)
@@ -92,6 +109,18 @@ save = "/tmp/out.rrd"
     assert settings.save_min_interval == 2.0
     assert settings.rerun_enabled is False
     assert settings.rerun_save == "/tmp/out.rrd"
+    assert settings.rerun_show_values is False
+    assert settings.rerun_show_coords is False
+    assert settings.rerun_show_count is True
+    assert settings.track_iou_threshold == 0.45
+    assert settings.track_match_max_distance == 0.8
+    assert settings.track_trail_length == 50
+    assert settings.track_max_missed == Settings().track_max_missed  # 没写的保留默认
+    assert settings.world_enabled is True
+    assert settings.world_height == 1.35
+    assert settings.world_pitch_deg == 20.0
+    assert settings.output_jsonl == "/tmp/people.jsonl"
+    assert settings.output_hz == 2.0
 
 
 def test_unknown_key_is_warned_not_silently_ignored(tmp_path) -> None:

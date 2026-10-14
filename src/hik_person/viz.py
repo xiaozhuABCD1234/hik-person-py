@@ -17,6 +17,8 @@
 ``person/coords/<id>/{x,y,z}``       每个人的坐标曲线（相机系，米）
 ``person/count``                     人数标量
 ``person/events``                    人数变化日志
+``world/...``                        世界系 3D 视图根（RIGHT_HAND_Z_UP，可选）
+``world/{joints,skeleton,trails,positions}``  世界系副本（刚体变换后）
 ===================================  =======================================
 
 每个人的颜色由 id 决定（``color_for``），所以同一个 id 在 2D、3D 与坐标曲线里都是
@@ -100,6 +102,8 @@ class RerunView:
         show_values: bool = True,
         show_coords: bool = True,
         show_count: bool = False,
+        world=None,
+        show_world_view: bool = False,
         eye: tuple[float, float, float] = (0.0, 0.0, -1.5),
         look_at: tuple[float, float, float] = (0.0, 0.0, 2.5),
         eye_up: tuple[float, float, float] = (0.0, -1.0, 0.0),
@@ -121,12 +125,14 @@ class RerunView:
         self.show_values = bool(show_values)
         self.show_coords = bool(show_coords)
         self.show_count = bool(show_count)
+        self.world = world
+        self.show_world_view = bool(show_world_view and world is not None)
         self.eye = tuple(eye)
         self.look_at = tuple(look_at)
         self.eye_up = tuple(eye_up)
         self._last_count: int | None = None  # None = 还没记录过人数
         self._image_size: tuple[int, int] | None = None  # (宽, 高)，用于固定取景
-        self._coords_logged = False  # 3D 视图的坐标系只发一次
+        self._coords_logged: set[str] = set()  # 3D 视图的坐标系（每个根只发一次）
         self._styled_series: set[str] = set()  # 已经声明过颜色的曲线（只声明一次）
 
         rr.init(app_id, spawn=False)
@@ -174,8 +180,11 @@ class RerunView:
                 panels.append(rrb.TimeSeriesView(origin="person/count", name="人数"))
                 shares.append(1)
             if self.show_pose3d:
-                panels.append(self._make_3d_view(rrb))
+                panels.append(self._make_3d_view(rrb, "camera/pose3d", "3D 姿态"))
                 shares.append(3)
+            if self.show_world_view:
+                panels.append(self._make_3d_view(rrb, "world", "世界系（地面）"))
+                shares.append(2)
 
             right = None
             if len(panels) == 1:
@@ -189,8 +198,8 @@ class RerunView:
             return
         self.rr.send_blueprint(blueprint)
 
-    def _make_3d_view(self, rrb):
-        """3D 骨架视图，相机钉在相机坐标系的默认位置。
+    def _make_3d_view(self, rrb, origin: str, name: str):
+        """3D 视图，相机钉在默认位置。
 
         不设 ``eye_controls`` 时 rerun 会按数据的包围盒自动取景，而单目深度逐帧抖动，
         骨架大小一直变，画面就跟着"自动缩放"。这里把眼位/视点/上方向固定下来，
@@ -207,8 +216,8 @@ class RerunView:
                     eye_up=list(self.eye_up),
                 )
         if controls is None:
-            return rrb.Spatial3DView(origin="camera/pose3d", name="3D 姿态")
-        return rrb.Spatial3DView(origin="camera/pose3d", name="3D 姿态", eye_controls=controls)
+            return rrb.Spatial3DView(origin=origin, name=name)
+        return rrb.Spatial3DView(origin=origin, name=name, eye_controls=controls)
 
     def _set_time(self, frame_number: int) -> None:
         # 0.23+ 用 set_time(...)，更早的版本用 set_time_sequence
@@ -401,15 +410,15 @@ class RerunView:
 
     # ---------------------------------------------------------------- 3D
     def log_people3d(self, people) -> None:
-        """记 3D：骨架 + 轨迹 + 位置（相机坐标系，米）。
+        """记 3D：骨架 + 轨迹 + 位置（相机坐标系，米）；开了 ``[world]`` 再记一份世界系。
 
         与 2D 一样走 static：viewer 只留最新一份，``people`` 为空就把 3D 视图清空。
+        世界系那份只是同一个刚体变换套一遍，方便直接看“人在地面上的位置”。
         """
         rr = self.rr
-        if not self._coords_logged:
-            # 相机坐标系（X 右 / Y 下 / Z 前）；不发的话 3D 视图可能倒着显示
-            self._log("camera/pose3d", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN)
-            self._coords_logged = True
+        self._log_coords("camera/pose3d", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, name="3D 姿态")
+        if self.world is not None:
+            self._log_coords("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, name="世界系")
 
         joints: list[np.ndarray] = []
         labels: list[str] = []
@@ -463,3 +472,42 @@ class RerunView:
                 radii=POSITION_RADIUS,
             ),
         )
+
+        if self.world is None:
+            return
+        # 世界系视图：同一个刚体变换套一遍
+        world_joints = [self.world.apply(points) for points in joints]
+        world_strips = [self.world.apply(strip) for strip in strips]
+        world_trails = [self.world.apply(trail) for trail in trails]
+        world_positions = [self.world.apply(point) for point in positions]
+        self._log(
+            "world/joints",
+            rr.Points3D(
+                np.concatenate(world_joints)
+                if world_joints
+                else np.zeros((0, 3), dtype=np.float32),
+                labels=labels,
+                colors=colors or None,
+                radii=JOINT_RADIUS,
+            ),
+        )
+        self._log("world/skeleton", rr.LineStrips3D(world_strips, colors=strip_colors))
+        self._log("world/trails", rr.LineStrips3D(world_trails, colors=trail_colors))
+        self._log(
+            "world/positions",
+            rr.Points3D(
+                np.stack(world_positions)
+                if world_positions
+                else np.zeros((0, 3), dtype=np.float32),
+                labels=position_labels,
+                colors=position_colors or None,
+                radii=POSITION_RADIUS,
+            ),
+        )
+
+    def _log_coords(self, entity: str, coordinates, *, name: str) -> None:
+        """坐标系只发一次：不发的话 3D 视图可能倒着/转着显示。"""
+        if entity in self._coords_logged:
+            return
+        self._coords_logged.add(entity)
+        self._log(entity, coordinates)

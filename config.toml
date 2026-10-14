@@ -167,3 +167,31 @@ trail_interval = 0.1
 speed_smoothing = 0.3
 # 低于它当“静止”（只影响显示与状态标签，不动曲线原始值）。
 speed_deadband = 0.15
+
+
+[world]
+# 相机坐标系 -> 世界（地面）系的静态外参。默认关：没量安装高度/俯仰角时，
+# 绝对坐标整体是错的，不如不开（外参不准只会整体偏移，不影响骨架形状与相对距离）。
+enabled = false
+# 光心离地高度（米）。卷尺量，或把人放到已知距离看深度读数校准。
+height = 1.0
+# 镜头下俯角度（度，正 = 向下）。手机水平仪贴在相机外壳上量，或用已知身高反推。
+pitch_deg = 0.0
+# 相机朝向与世界 X 的夹角（度，左转为正）与绕光轴的旋转；装得周正就都是 0。
+yaw_deg = 0.0
+roll_deg = 0.0
+# 右下角再开一个世界系 3D 视图（相机系那个照旧）。
+view = false
+
+# 尺度提醒：3D 坐标来自 yolo26*-depth 的单目估计，绝对尺度会飘。
+# 世界坐标适合"谁在谁左边、大概多远"这类相对比较，别当公制真值；
+# 要给底盘发坐标先拿已知身高或已知距离把尺度校一遍。
+
+[output]
+# 非空则把人写成 JSON Lines（追加写，一行一帧，直接 json.loads 就能读）。
+# 每行：t/wall/frame/device_timestamp_ms/count + people[]（id/conf/distance/cam/world/
+# speed/speed_ground/state/velocity/box/valid_keypoints/coverage/age/missed）。
+# cam 与世界坐标同样建立在单目估计深度上，绝对公制值不可全信。
+jsonl = ""
+# 写 JSONL 的频率（Hz）。跟踪是高频的，日志没必要跟满。
+hz = 5.0
