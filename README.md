@@ -64,6 +64,28 @@ eye_up = [0.0, -1.0, 0.0]
 kalman = true                 # 3D 关键点卡尔曼滤波
 kalman_process = 10.0         # 过程噪声（m/s²）：越大越跟手
 kalman_measurement = 0.1      # 观测噪声（m）：越大越平滑
+
+[track]
+iou_threshold = 0.3           # 跨帧关联的匹配线：越高越容易把同一个人判成两个
+match_max_distance = 0.0      # >0 时配对还要满足 3D 距离（米），防交叉换 id；0 = 只看 IoU
+max_missed = 5                # 连续漏检这么多帧后删轨迹（期间位置走卡尔曼预测）
+max_missed_kpt = 3            # 单个关键点连续丢这么多帧就不再画
+trail_length = 300            # 轨迹点数上限（0 = 不留轨迹）
+trail_interval = 0.1          # 轨迹采样间隔（秒）
+speed_smoothing = 0.3         # 速度指数平滑时间常数（秒），0 = 不平滑
+speed_deadband = 0.15         # 低于它当"静止"（只影响显示与状态标签）
+
+[world]
+enabled = false               # 相机系 -> 世界（地面）系；没量过安装角度就别开
+height = 1.0                  # 光心离地高度（米）
+pitch_deg = 0.0               # 镜头下俯角度（度，正 = 向下）
+yaw_deg = 0.0                 # 相机朝向与世界 X 的夹角（度）；装得周正就是 0
+roll_deg = 0.0                # 绕光轴的旋转（度）
+view = false                  # 右下角再开一个世界系 3D 视图（相机系那个照旧）
+
+[output]
+jsonl = ""                    # 非空则把人写成 JSON Lines（追加写，一行一帧）
+hz = 5.0                      # 写 JSONL 的频率（Hz）
 ```
 
 写错的键名**会警告**而不是被静默忽略（参数文件最怕"改了没生效还不知道"）：
@@ -78,7 +100,10 @@ warning: 未知配置项 [rerun].enable，已忽略
 命令行覆盖（`--help` 有全部）：`--serial --index --camera-fps --exposure-us --gain-db
 --brightness --exposure-start-us --exposure-fps-headroom --read-timeout-ms --feature
 --weights --conf --imgsz --device --kpt-conf --detect-hz --duration --max-frames --save-dir
---rerun/--no-rerun --rerun-save`。收到命令行没给的项一律保留配置文件/兜底值，所以
+--rerun/--no-rerun --rerun-save --show-values/--no-show-values --show-coords --show-count
+--track-iou-threshold --track-match-max-distance --track-max-missed --track-trail-length
+--world/--no-world --world-height --world-pitch --world-yaw --world-roll --world-view
+--jsonl --output-hz`。收到命令行没给的项一律保留配置文件/兜底值，所以
 `--gain-db 0` 和"没给增益"是两件事。
 
 ## 相机
@@ -297,6 +322,11 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 | `person/events` | 人数变化日志（带各框置信度） |
 | `camera/pose3d/joints` | 仅 pose+pose3d：3D 关键点 `Points3D`（相机坐标，米） |
 | `camera/pose3d/skeleton` | 仅 pose+pose3d：3D 骨架 `LineStrips3D` |
+| `camera/pose3d/trails` | 每个人的运动轨迹 `LineStrips3D`（按 `trail_interval` 采样） |
+| `camera/pose3d/positions` | 每个人的 3D 位置球，标签 = `#id 距离 · 地面速度` |
+| `world/...` | 开了 `[world]` 才有：骨架/轨迹/位置的世界系副本（`RIGHT_HAND_Z_UP`） |
+| `person/values` | 每人一行的极简数值（距/速/状态/有效关节），右列顶部 |
+| `person/coords/<id>/{x,y,z}` | 每个人的坐标曲线（相机系，米；`show_coords` 控制） |
 
 ### 单目 3D 骨架（右下角小窗）
 
@@ -319,7 +349,8 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 * **深度图**先整倍数降采样再送（1440×1080 的 float32 每帧 6 MB，小窗用不着），
   `DepthImage` 在 viewer 侧上色。
 
-小窗里画的是关节点 `Points3D` + 骨头 `LineStrips3D`（相机坐标系，`RIGHT_HAND_Y_DOWN`）。
+小窗里画的是关节点 `Points3D` + 骨头 `LineStrips3D`（相机坐标系，`RIGHT_HAND_Y_DOWN`），
+外加每个人的位置球与轨迹；颜色跟着 id 走，标签是 `#id 距离 · 地面速度`（见「跟踪与 ID」）。
 
 **它只是看着像 3D，不是测量**：深度是模型从单张图估的，绝对尺度会有出入（实测
 `bus.jpg` 里一个人的垂直跨度会比真身高大一截），而且相机没标定，只按一个假定的视场角
@@ -343,6 +374,77 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
   别让 viewer 把 stdout 占住。
 * 不想开窗口也不留文件，就用 `--no-rerun`；要只留检测到人的帧（最多 1 张/秒，见
   `save_min_interval`）就用 `--no-rerun --save-dir`。
+
+## 跟踪与 ID：持久 id / 轨迹 / 相对量速度
+
+2D 关键点 + 深度抬成 3D 之后，跨帧要把"第 i 个人"对上号：前后帧用检测框 IoU 贪心配对
+（`[track].iou_threshold`），可选再加一条 3D 距离门限（`match_max_distance`）——
+两个人交错而过时光靠 IoU 容易换 id，加上"位置不能跳太远"就稳了。配上就**沿用同一个 id**。
+
+* **id 单调递增、永不复用**，可以直接当人的编号写进日志（`[output].jsonl` 里就是它）。
+* **漏检不清空**：轨迹保留 `max_missed` 帧（15 Hz 下 5 帧 ≈ 0.33 s），期间位置由卡尔曼
+  预测（框留着、2D 关键点不再画），所以短时间被遮挡的人不会丢 id，也不会在曲线里被数两遍。
+* **单个关键点**连续丢 `max_missed_kpt` 帧后不再画，人的其他部位继续画。
+* **轨迹**按 `trail_interval` 限流记录，最多 `trail_length` 个点（0 = 不留）。
+* **速度**优先取位置卡尔曼的速度状态，再走一道指数平滑（`speed_smoothing`）：
+  单目深度抖动大，不平滑就会看到速度在 0 和 1 之间乱跳。`speed_ground` 是沿**上方向**的
+  垂直分量之外的部分，"人走多快"看它；低于 `speed_deadband` 显示"静止"。
+  "上方向"默认取相机 -Y（假定镜头水平）；开了 `[world]` 就换成世界 Z，镜头俯仰时才算得准。
+
+**画面里的 id**：框、关键点、骨架、曲线都用同一个 id 决定颜色（`viz.PALETTE` 按 id 轮转），
+所以同一个人在任何视图里都同色；标签写成 `#3 0.87`（id + 置信度）。右列顶部那份
+`person/values` 每人一行：
+
+```
+- #1 · 距 2.35 m · 速 0.40 m/s · 行走 · 关节 14/17
+- #2 · 距 1.02 m · 速 0.00 m/s · 静止 · 关节 12/17
+```
+
+深度模型比 pose 贵（m 档 22 ms vs 16.6 ms，x 档 44 ms），所以深度按 `[pose3d].hz` 单独限速：
+**没到深度时刻的那几帧只做 2D 关联**（id/轨迹照常，3D 部分走预测），不会拿上一帧的旧深度
+去抬这一帧的关键点。`--no-pose3d` 时整个跟踪退化成 2D-only（只有 id 与轨迹，无距离/速度）。
+
+尺度口径（重要）：`distance` / `speed` / 世界坐标都建立在**单目估计深度**上，绝对公制值
+不可全信 —— 同一次运行内做相对比较（谁更快、谁更靠前）才有意义。`valid_keypoints` /
+`coverage`（有效关节比例）是尺度无关的可信度自检。d435i 那边的真深度可以直接量身高/肩宽，
+这边不出这类绝对量指标。
+
+## 世界坐标系与 JSON Lines 输出
+
+### 世界坐标（`[world]`）
+
+`[world].enabled = true` 时额外算一份"人在地面上的位置"。只需要三个数（`--world-height` /
+`--world-pitch` / `--world-yaw` 可临时覆盖）：
+
+1. `height`：光心离地多高（米）。卷尺量，或把人放到已知距离看深度读数校准。
+2. `pitch_deg`：镜头往下俯了几度。手机水平仪靠在相机外壳上量，或用已知身高反推。
+3. `yaw_deg` / `roll_deg`：装得周正就都是 0。
+
+坐标系照 ROS REP-103 的习惯：相机系 `RDF`（X 右 / Y 下 / Z 前）-> 世界系 `FLU`
+（X 前 / Y 左 / Z 上，原点在相机正下方的地面点）。水平放置时相机前方 2 m 的点就在世界
+`(2, 0, 高度)`；镜头竖直向下时同一个点落在脚下 2 m。外参不准只会让**绝对位置**整体偏移，
+不影响骨架形状与相对距离；`--world-view` 可以在右下角再开一个世界系 3D 视图对照看。
+
+**单目方案的前提**：深度是估的，绝对尺度会飘，所以世界坐标适合"谁在谁左边、大概多远"
+这类相对比较，不要当公制真值；要给底盘发坐标，先用已知身高或已知距离把尺度校一遍。
+
+### JSON Lines（`[output]`）
+
+`[output].jsonl` 非空时按 `[output].hz` **追加**写每帧的人（`--no-rerun` 也照写）：
+
+```json
+{"t": 3.86, "wall": 1791975404.516, "frame": 264, "device_timestamp_ms": 1791975404487,
+ "count": 2,
+ "people": [{"id": 3, "conf": 0.87, "distance": 2.31,
+             "cam": [0.12, -0.05, 2.31], "world": [0.31, -0.12, 1.10],
+             "speed": 0.41, "speed_ground": 0.41, "state": "行走",
+             "velocity": [-0.02, 0.01, 0.41], "box": [301.2, 120.4, 360.8, 470.1],
+             "valid_keypoints": 14, "coverage": 0.82, "age": 96, "missed": 0}]}
+```
+
+* `t` 是**相对本次运行起点**的秒（`wall` 是绝对时间，跨次对齐用它），一行一帧、写完即 flush。
+* 位置测不到时 `cam` / `world` / `distance` 是 `null`，不会给一个骗人的 `(0,0,0)`。
+* `speed` / `speed_ground` 与 `cam` / `world` 同样是**估计尺度**（见上）。
 
 ## 不需要任何 .sh
 
@@ -377,6 +479,12 @@ src/hik_person/
 ├── colors.py    像素格式映射 + Bayer/BGR/RGB 转换
 ├── mvs.py       MVS 运行时环境、枚举、取流、测光、特性改写
 ├── pose.py      ultralytics YOLO 姿态（COCO-17 骨架）
+├── depth.py     单目深度估计（ultralytics depth 任务）
+├── geometry.py  内参 / 深度取样 / 反投影（纯函数）
+├── pose3d.py    关键点 -> 3D 人（含"人在哪"的逐级兜底）
+├── track.py     卡尔曼 + IoU 关联（持久 id / 轨迹 / 相对量速度）
+├── world.py     相机系 -> 世界（地面）系的静态外参
+├── output.py    JSON Lines 输出
 ├── viz.py       rerun 记录与布局（Image / Boxes2D / Points2D / LineStrips2D / Scalars）
 └── __main__.py  CLI，只负责把参数接起来
 tools/
