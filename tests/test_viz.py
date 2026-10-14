@@ -273,6 +273,8 @@ def test_speed_curve_is_per_person_and_coords_are_gone(monkeypatch: pytest.Monke
     # 路径按组分层（与 d435i 的指标命名一致）：person/metrics/<组>/<指标>/<id>
     assert "person/metrics/speed/speed_ground/2" in entities
     assert "person/metrics/speed/speed_ground/3" in entities
+    # 三维速度模长 speed 不画曲线（单目下竖直抖动太大），只在 JSONL 里
+    assert not [e for e in entities if e.endswith("/speed/2")], entities
     assert not [entity for entity in entities if entity.startswith("person/coords")], entities
     # 曲线要带时间戳（static 的话画不成曲线）
     assert ("person/metrics/speed/speed_ground/2", False) in calls

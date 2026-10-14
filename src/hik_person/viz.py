@@ -207,6 +207,11 @@ def fall_alert_panel(people, history=(), now: float | None = None) -> str:
 
 # 指标曲线按"什么时候会一起看"分组：框里的实体路径是 person/metrics/<组>/<指标>/<id>，
 # 组名用来开一个 TimeSeriesView（一人一条曲线，颜色与图例名由 id 决定）。
+# 画成曲线的指标：速度只画"地面速度"这一条（与数值行的「速」同源），三维速度模长
+# speed 只出现在 JSONL 里——它在单目深度下被竖直方向的抖动带得很难看，画出来只是噪声。
+# 加新指标要么进这里，要么只走 JSONL，这是有意的显式选择。
+CURVE_METRICS: frozenset[str] = frozenset({"speed_ground", "fall_level", "torso_angle"})
+
 METRIC_GROUP: dict[str, str] = {
     "speed": "speed",
     "speed_ground": "speed",
@@ -540,7 +545,7 @@ class RerunView:
         if self.show_metrics:
             for person in live:
                 for key, value in person.metrics.items():
-                    if np.isfinite(value):
+                    if key in CURVE_METRICS and np.isfinite(value):
                         self._log_scalar(
                             metric_path(key, person.id), float(value), person_id=person.id
                         )

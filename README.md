@@ -342,7 +342,7 @@ uv run python tools/check_colors.py --save-dir /tmp/hik-color-check
 | `camera/pose3d/positions` | 每个人的 3D 位置球，标签 = `#id 距离 · 地面速度` |
 | `world/...` | 开了 `[world]` 才有：骨架/位置的世界系副本（`RIGHT_HAND_Z_UP`） |
 | `person/values` | 每人一行的极简数值（距/速/状态/有效关节），右列顶部 |
-| `person/metrics/<组>/<指标>/<id>` | 每个人的指标曲线：`speed`（速度）、`fall`（`fall_level` 等级 / `torso_angle` 躯干角）；颜色与图例名由 id 决定 |
+| `person/metrics/<组>/<指标>/<id>` | 每个人的指标曲线：`speed` 组只画 `speed_ground`（地面速度，与数值行的「速」同源；三维模长 `speed` 只进 JSONL）、`fall` 组画 `fall_level`（等级）/ `torso_angle`（躯干角）；颜色与图例名由 id 决定 |
 | `person/fall_light` | **摔倒报警灯**（一格 2D：整块颜色 + 格内文字；红=摔倒会闪 / 琥珀=疑似倒地 / 绿=正常 / 暗蓝灰=无人） |
 | `person/fall_alert` | 报警灯的纯文本副本（markdown，可选中复制） |
 | `person/fall` | 摔倒状态变化日志（只在跳变时记一条） |
